@@ -67,10 +67,25 @@ async def send_reply(
     embed: discord.Embed | None = None,
     ephemeral: bool = True,
 ):
-    if inter.response.is_done():
-        await inter.followup.send(content=content, embed=embed, ephemeral=ephemeral)
-    else:
-        await inter.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+    """
+    Interaction 응답 헬퍼.
+    - 이미 응답했으면 followup.send 사용
+    - 아직이면 response.send_message 사용
+    - 404 Unknown interaction(10062) 은 조용히 무시해서
+      명령은 실행되었는데도 에러 로그가 터지는 상황을 방지
+    """
+    try:
+        if inter.response.is_done():
+            await inter.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+        else:
+            await inter.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+    except discord.NotFound as e:
+        # 10062: Unknown interaction → 토큰이 만료되었거나 다른 이유로 유효하지 않을 때
+        # DB 작업 등은 이미 끝난 상태일 수 있으니, 여기서는 그냥 로그만 찍고 무시
+        print(f"⚠️ send_reply: Unknown interaction (아마 응답 시간 초과/재시작 등) → {e}")
+    except Exception as e:
+        # 다른 예외는 디버깅용으로만 찍어두고, 봇이 죽지 않게 함
+        print(f"⚠️ send_reply 중 예외 발생: {e}")
 
 
 # ---- 관리자용 봇채널 테이블 (command_channels) ----
@@ -609,15 +624,43 @@ async def slash_set_main_currency_name(inter: discord.Interaction, new_name: str
     settings = await get_or_create_guild_settings(inter.guild.id)
     main_currency_id = settings["main_currency_id"]
 
+    # 🔹 메인 재화가 아직 하나도 지정되지 않은 경우: 자동으로 하나 지정해 주기
     if main_currency_id is None:
-        await send_reply(
-            inter,
-            "이 서버에 아직 메인 재화가 설정되어 있지 않습니다.\n"
-            "`/재화`로 재화를 확인하고, 필요하다면 관리자가 기본 재화를 먼저 설정해주세요.",
-            ephemeral=True,
-        )
-        return
+        currencies = await list_currencies(inter.guild.id)
+        if not currencies:
+            await send_reply(
+                inter,
+                "이 서버에 아직 재화가 하나도 없습니다. `/재화추가`로 먼저 재화를 만들어 주세요.",
+                ephemeral=True,
+            )
+            return
 
+        # 우선 is_main이 이미 찍혀 있는 재화가 있으면 그걸 메인으로,
+        # 아니면 첫 번째 재화를 메인으로 지정
+        main_cur = next((c for c in currencies if c["is_main"]), None)
+        if main_cur is None:
+            main_cur = currencies[0]
+
+        main_currency_id = main_cur["id"]
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            # guild 내 모든 재화에서 is_main 리셋 후, 선택한 것만 메인으로
+            await db.execute(
+                "UPDATE currencies SET is_main = 0 WHERE guild_id = ?",
+                (inter.guild.id,),
+            )
+            await db.execute(
+                "UPDATE currencies SET is_main = 1 WHERE id = ?",
+                (main_currency_id,),
+            )
+            # guild_settings 테이블에도 메인 재화 id 저장
+            await db.execute(
+                "UPDATE guild_settings SET main_currency_id = ? WHERE guild_id = ?",
+                (main_currency_id, inter.guild.id),
+            )
+            await db.commit()
+
+    # 여기부터는 "이미 메인 재화 id는 있다"라고 보고 이름만 바꾸는 기존 로직
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
@@ -652,6 +695,7 @@ async def slash_set_main_currency_name(inter: discord.Interaction, new_name: str
         f"- 코드: `{code}` (코드는 그대로 유지됩니다)",
         ephemeral=True,
     )
+
 
 
 # =========================================================
