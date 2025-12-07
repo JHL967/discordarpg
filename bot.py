@@ -212,6 +212,45 @@ async def get_fishing_channel_id(guild_id: int) -> int | None:
         row = await cursor.fetchone()
         await cursor.close()
     return row[0] if row else None
+# ---- 거래 채널 테이블 (trade_channels) ----
+
+async def ensure_trade_channel_table():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_channels (
+                guild_id    INTEGER PRIMARY KEY,
+                channel_id  INTEGER NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+
+async def set_trade_channel(guild_id: int, channel_id: int):
+    await ensure_trade_channel_table()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO trade_channels (guild_id, channel_id)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id
+            """,
+            (guild_id, channel_id),
+        )
+        await db.commit()
+
+
+async def get_trade_channel_id(guild_id: int) -> int | None:
+    await ensure_trade_channel_table()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT channel_id FROM trade_channels WHERE guild_id = ?",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+    return row[0] if row else None
 
 
 # ---- 채널 체크 공통 (Interaction용) ----
@@ -293,6 +332,26 @@ async def ensure_channel_inter(inter: discord.Interaction, kind: str) -> bool:
             return False
 
         return True
+    if kind == "trade":
+        channel_id = await get_trade_channel_id(guild_id)
+        if channel_id is None:
+            await send_reply(
+                inter,
+                "아직 이 서버의 **거래 채널**이 설정되지 않았어요.\n"
+                "서버 관리자가 `/거래채널설정` 명령으로 설정해야 합니다.",
+                ephemeral=True,
+            )
+            return False
+
+        if str(inter.channel.id) != str(channel_id):
+            await send_reply(
+                inter,
+                "이 명령어는 지정된 **거래 채널**에서만 사용할 수 있어요!",
+                ephemeral=True,
+            )
+            return False
+
+        return True
 
     if kind == "fish":
         channel_id = await get_fishing_channel_id(guild_id)
@@ -352,6 +411,7 @@ async def on_ready():
     await ensure_admin_channel_table()
     await ensure_user_channel_table()
     await ensure_fishing_channel_table()
+    await ensure_trade_channel_table()
 
     # 글로벌 슬래시 명령 동기화
     if not synced:
@@ -460,6 +520,16 @@ async def slash_set_fishing_channel(inter: discord.Interaction, channel: discord
         return
     await set_fishing_channel(inter.guild.id, channel.id)
     await send_reply(inter, f"✅ 낚시 채널이 {channel.mention} 로 설정되었습니다.", ephemeral=True)
+
+@bot.tree.command(name="거래채널설정", description="재화/아이템 선물 명령어를 사용할 거래 채널을 설정합니다.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def slash_set_trade_channel(inter: discord.Interaction, channel: discord.TextChannel):
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
+    await set_trade_channel(inter.guild.id, channel.id)
+    await send_reply(inter, f"✅ 거래 채널이 {channel.mention} 로 설정되었습니다.", ephemeral=True)
+
 
 
 # =========================================================
@@ -996,7 +1066,7 @@ async def slash_inventory_cmd(inter: discord.Interaction):
     msg = "\n".join(lines)
     await send_reply(
         inter,
-        f"🎒 **{inter.user.display_name}** 님의 인벤토리:\n{msg}",
+        f"📦 **{inter.user.display_name}** 님의 인벤토리:\n{msg}",
         ephemeral=True,
     )
 
@@ -1017,7 +1087,7 @@ async def slash_gift_currency(
     amount: int,
     currency_identifier: str,
 ):
-    if not await ensure_channel_inter(inter, "user"):
+    if not await ensure_channel_inter(inter, "trade"):
         return
 
     if member.id == inter.user.id:
@@ -1078,7 +1148,7 @@ async def slash_gift_item(
     item_name: str,
     quantity: int,
 ):
-    if not await ensure_channel_inter(inter, "user"):
+    if not await ensure_channel_inter(inter, "trade"):
         return
 
     if member.id == inter.user.id:
@@ -1660,7 +1730,7 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str):
         f"- 지불: {price} {cur_name} (`{cur_code}`)\n"
         f"- 남은 소지금: {new_balance} {cur_name}\n"
         f"- 남은 재고: {new_stock_text}",
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -1748,7 +1818,7 @@ async def slash_sell_shop(inter: discord.Interaction):
     await send_reply(inter, embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="판매", description="인벤토리의 아이템을 판매 상점에 판매합니다.")
+@bot.tree.command(name="판매", description="인벤토리의 아이템을 판매 상점에 판매합니다. 한번에 한 종류의 상품만 판매가능합니다.")
 @app_commands.describe(
     item_name="판매할 아이템 이름",
     quantity="판매할 개수 (양수)",
@@ -1827,7 +1897,7 @@ async def slash_sell(
         f"- 아이템: {sell_item['item_name']} x {quantity}개\n"
         f"- 얻은 재화: {total_price} {sell_item['currency_name']} (`{sell_item['currency_code']}`)\n"
         f"- 판매 후 소지금: {new_balance} {sell_item['currency_name']}",
-        ephemeral=True,
+        ephemeral=False,
     )
 @bot.tree.command(
     name="판매제거",
@@ -2552,6 +2622,7 @@ async def slash_help(inter: discord.Interaction):
     user_channel = await get_user_channel_id(guild_id)
     admin_channel = await get_admin_channel_id(guild_id)
     fishing_channel = await get_fishing_channel_id(guild_id)
+    trade_channel = await get_trade_channel_id(guild_id)
 
     is_admin = inter.user.guild_permissions.manage_guild
 
@@ -2571,9 +2642,14 @@ async def slash_help(inter: discord.Interaction):
         ("`/재화`", "서버 재화 목록 보기"),
         ("`/소지금`", "자신의 소지금 확인"),
         ("`/인벤토리`", "자신의 인벤토리 확인"),
+    ]
+
+    # 거래 채널(선물 전용)
+    cmds_trade = [
         ("`/재화선물`", "다른 사용자에게 재화를 선물"),
         ("`/아이템선물`", "다른 사용자에게 아이템을 선물"),
     ]
+
 
     # 출석 채널
     cmds_attend = [
@@ -2601,6 +2677,7 @@ async def slash_help(inter: discord.Interaction):
         ("`/명령어채널설정`", "관리자 채널 설정"),
         ("`/사용자채널설정`", "사용자 채널 설정"),
         ("`/낚시채널설정`", "낚시 채널 설정"),
+        ("`/거래채널설정`", "거래 채널 설정 (재화/아이템 선물)"),
         ("`/재화추가`", "새 재화 등록"),
         ("`/재화활성 / 재화비활성`", "재화 활성/비활성"),
         ("`/재화삭제`", "재화 삭제"),
@@ -2622,6 +2699,8 @@ async def slash_help(inter: discord.Interaction):
     in_user = (user_channel is not None and channel_id == user_channel)
     in_admin = (admin_channel is not None and channel_id == admin_channel)
     in_fish = (fishing_channel is not None and channel_id == fishing_channel)
+    in_trade = (trade_channel is not None and channel_id == trade_channel)
+
 
     embed.add_field(
         name="🔹 공통 명령어",
@@ -2643,6 +2722,11 @@ async def slash_help(inter: discord.Interaction):
         embed.add_field(
             name="🔹 사용자 채널 명령어",
             value="\n".join([f"{cmd} — {desc}" for cmd, desc in cmds_user]),
+            inline=False,
+        )
+        embed.add_field(
+            name="🔹 거래 채널 명령어",
+            value="\n".join([f"{cmd} — {desc}" for cmd, desc in cmds_trade]),
             inline=False,
         )
         embed.add_field(
@@ -2678,7 +2762,12 @@ async def slash_help(inter: discord.Interaction):
             value="\n".join([f"{cmd} — {desc}" for cmd, desc in cmds_user]),
             inline=False,
         )
-
+    if in_trade:
+        embed.add_field(
+            name="🔹 거래 채널 명령어",
+            value="\n".join([f"{cmd} — {desc}" for cmd, desc in cmds_trade]),
+            inline=False,
+        )
     if in_fish:
         embed.add_field(
             name="🔹 낚시 채널 명령어",
