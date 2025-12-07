@@ -2160,7 +2160,42 @@ async def slash_fishing(inter: discord.Interaction):
         f"획득한 아이템은 인벤토리에 저장되었습니다. `/인벤토리` 로 확인해보세요.",
         ephemeral=False,
     )
+@bot.tree.command(
+    name="인벤초기화",
+    description="특정 유저의 인벤토리를 전부 비웁니다. (관리자)",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    member="인벤토리를 초기화할 사용자",
+)
+async def slash_clear_inventory(
+    inter: discord.Interaction,
+    member: discord.Member,
+):
+    # 서버 안에서만 사용
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
 
+    # 관리자용 채널에서만 사용하고 싶으면 이 줄을 켜기
+    # if not await ensure_channel_inter(inter, "admin"):
+    #     return
+
+    # 내부 users.id 가져오기
+    user = await get_or_create_user(inter.guild.id, member.id)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM inventories WHERE user_id = ?",
+            (user["id"],),
+        )
+        await db.commit()
+
+    await send_reply(
+        inter,
+        f"🧹 **{member.display_name}** 님의 인벤토리를 전부 초기화했습니다.",
+        ephemeral=False,
+    )
 
 # =========================================================
 # 9. 정산 / 확인 (관리자용 봇채널)
