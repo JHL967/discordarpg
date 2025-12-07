@@ -1210,23 +1210,48 @@ async def slash_add_event_item(
     )
 
 
-@bot.tree.command(name="아이템삭제", description="상점 아이템을 삭제합니다. (관리자)")
+@bot.tree.command(
+    name="아이템삭제",
+    description="상점 아이템을 이름으로 삭제합니다. (관리자)",
+)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def slash_delete_item_cmd(inter: discord.Interaction, item_id: int):
+@app_commands.describe(
+    item_name="삭제할 아이템 이름 (상점에 표시된 이름 그대로 입력)"
+)
+async def slash_delete_item_cmd(inter: discord.Interaction, item_name: str):
+    # 상점 채널에서만 사용 가능
     if not await ensure_channel_inter(inter, "shop"):
         return
 
-    item = await get_item_by_id(inter.guild.id, item_id)
-    if not item:
-        await send_reply(inter, "해당 ID의 아이템이 이 서버 상점에 존재하지 않습니다.", ephemeral=True)
+    name = item_name.strip()
+    if not name:
+        await send_reply(
+            inter,
+            "삭제할 아이템 이름을 입력해주세요.",
+            ephemeral=True,
+        )
         return
 
-    await delete_item(inter.guild.id, item_id)
+    # 이름으로 아이템 찾기
+    item = await get_item_by_name(inter.guild.id, name)
+    if not item:
+        await send_reply(
+            inter,
+            f"`{name}` 이름의 아이템을 이 서버 상점에서 찾을 수 없습니다.\n"
+            "`/상점` 또는 `/이벤트상점`으로 아이템 이름을 다시 확인해 주세요.",
+            ephemeral=True,
+        )
+        return
+
+    # 실제 삭제는 여전히 id 기준으로 (DB 헬퍼 재사용)
+    await delete_item(inter.guild.id, item["id"])
+
     await send_reply(
         inter,
-        f"🗑 아이템 삭제 완료: [{item_id}] {item['name']}",
+        f"🗑 아이템 삭제 완료: [{item['id']}] {item['name']}",
         ephemeral=True,
     )
+
 
 
 # =========================================================
