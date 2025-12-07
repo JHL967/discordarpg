@@ -62,13 +62,24 @@ async def init_db():
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id        INTEGER NOT NULL,
-                user_id         INTEGER NOT NULL,
-                last_attend_date TEXT
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id             INTEGER NOT NULL,
+                user_id              INTEGER NOT NULL,
+                last_attend_date     TEXT
             )
             """
         )
+
+        # ✅ 새로 추가: 보너스 출석 날짜 컬럼
+        # 이미 컬럼이 있는 상태에서 다시 실행되면 에러가 나기 때문에
+        # try/except 로 한 번만 추가되도록 감싸준다.
+        try:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN last_bonus_attend_date TEXT"
+            )
+        except Exception:
+            # 이미 컬럼이 있으면 여기로 들어오므로 그냥 무시
+            pass
 
         # -------------------------------------------------
         # 잔액
@@ -672,6 +683,14 @@ async def get_sell_item_by_name(guild_id: int, item_name: str):
         await cursor.close()
         return dict(row) if row else None
 
+async def update_user_last_bonus_attend(user_pk: int, date_str: str):
+    """보너스 출석을 한 날짜를 기록하는 함수"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET last_bonus_attend_date = ? WHERE id = ?",
+            (date_str, user_pk),
+        )
+        await db.commit()
 
 # ---------------------------------------------------------
 # 낚시(fishing_loot) 헬퍼

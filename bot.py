@@ -23,6 +23,7 @@ from db import (
     get_currency_by_code,
     get_or_create_user,
     update_user_last_attend,
+    update_user_last_bonus_attend,
     get_balance,
     change_balance,
     get_items,
@@ -749,6 +750,131 @@ async def slash_attend(inter: discord.Interaction):
     await send_reply(
         inter,
         f"🎲 출석 완료! 1d50 → **{roll}** 이(가) 나왔어요.\n"
+        f"획득 재화: **{cur_name}** (`{cur_code}`)\n"
+        f"현재 소지금: **{new_amount} {cur_name}**",
+        ephemeral=False,
+    )
+
+@bot.tree.command(
+    name="재출석",
+    description="특정 행운 아이템을 사용해 오늘 한 번 더 출석 보상을 받습니다.",
+)
+async def slash_bonus_attend(inter: discord.Interaction):
+    if not await ensure_channel_inter(inter, "attend"):
+        return
+
+    # 오늘 날짜 (기존 /출석과 동일하게 사용)
+    today_str = datetime.date.today().isoformat()
+
+    settings = await get_or_create_guild_settings(inter.guild.id)
+    attend_currency_id = settings["attend_currency_id"]
+
+    # 기본 유저 정보
+    user = await get_or_create_user(inter.guild.id, inter.user.id)
+
+    # 1) 오늘 아직 일반 출석을 안 했으면 /재출석 사용 불가
+    if user["last_attend_date"] != today_str:
+        await send_reply(
+            inter,
+            "아직 오늘 기본 출석을 하지 않았어요!\n"
+            "`/출석` 으로 먼저 오늘 출석을 한 뒤에 `/재출석` 을 사용해 주세요.",
+            ephemeral=True,
+        )
+        return
+
+    # 2) 오늘 이미 재출석을 한 적이 있다면 또 못 쓰게
+    if user.get("last_bonus_attend_date") == today_str:
+        await send_reply(
+            inter,
+            "오늘은 이미 `/재출석` 을 사용했어요.\n내일 다시 사용해 주세요 😊",
+            ephemeral=True,
+        )
+        return
+
+    # 3) 인벤토리에서 '출석 주사위' 또는 '행운의 꼬리' 보유 여부 확인
+    lucky_items = ["출석 주사위", "행운의 꼬리"]
+    chosen_row = None
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT inv.id AS inv_id, inv.quantity, i.name
+              FROM inventories AS inv
+              JOIN items AS i ON inv.item_id = i.id
+             WHERE inv.user_id = ?
+               AND i.guild_id = ?
+               AND i.name IN (?, ?)
+            """,
+            (user["id"], inter.guild.id, lucky_items[0], lucky_items[1]),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    # rows 안에 두 아이템 중 어떤 것이든 있을 수 있으니 우선순위 정하기
+    for name in lucky_items:
+        for row in rows:
+            if row["name"] == name:
+                chosen_row = row
+                break
+        if chosen_row:
+            break
+
+    if not chosen_row:
+        await send_reply(
+            inter,
+            "인벤토리에 **출석 주사위** 또는 **행운의 꼬리**가 있어야 `/재출석` 을 사용할 수 있어요.",
+            ephemeral=True,
+        )
+        return
+
+    used_item_name = chosen_row["name"]
+    inv_id = chosen_row["inv_id"]
+    qty = chosen_row["quantity"]
+
+    # 4) 아이템 1개 소모
+    async with aiosqlite.connect(DB_PATH) as db:
+        if qty > 1:
+            await db.execute(
+                "UPDATE inventories SET quantity = ? WHERE id = ?",
+                (qty - 1, inv_id),
+            )
+        else:
+            await db.execute(
+                "DELETE FROM inventories WHERE id = ?",
+                (inv_id,),
+            )
+        await db.commit()
+
+    # 5) 출석 재화 정보 확인
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT name, code FROM currencies WHERE id = ?",
+            (attend_currency_id,),
+        )
+        cur_row = await cursor.fetchone()
+        await cursor.close()
+
+    if not cur_row:
+        await send_reply(
+            inter,
+            "출석 재화 설정에 문제가 있습니다. 관리자에게 문의해주세요.",
+            ephemeral=False,
+        )
+        return
+
+    cur_name, cur_code = cur_row
+
+    # 6) 1d50 다시 굴려서 추가 보상 지급
+    roll = random.randint(1, 50)
+    new_amount = await change_balance(user["id"], attend_currency_id, roll)
+
+    # 7) 오늘 재출석 사용 날짜 기록 (기본 출석 날짜는 그대로 둠)
+    await update_user_last_bonus_attend(user["id"], today_str)
+
+    await send_reply(
+        inter,
+        f"🍀 **{used_item_name}** 을(를) 사용하여 추가 출석에 성공했습니다!\n"
+        f"🎲 보너스 출석 1d50 → **{roll}**\n"
         f"획득 재화: **{cur_name}** (`{cur_code}`)\n"
         f"현재 소지금: **{new_amount} {cur_name}**",
         ephemeral=False,
@@ -1610,6 +1736,59 @@ async def slash_remove_sell_item(
         ephemeral=True,
     )
 
+@bot.tree.command(
+    name="관리자아이템추가",
+    description="상점에 보이지 않는 관리자 전용 아이템을 추가합니다. (재고 무제한)",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    name="아이템 이름",
+    description="아이템 설명 (선택, 비워두면 '관리자 전용 아이템')",
+    currency_identifier="기준 재화 코드 또는 이름 (예: coin, 여우코인)",
+)
+async def slash_add_admin_item(
+    inter: discord.Interaction,
+    name: str,
+    description: str | None,
+    currency_identifier: str,
+):
+    # 관리자용 봇 채널에서만 사용
+    if not await ensure_channel_inter(inter, "admin"):
+        return
+
+    desc = description or "관리자 전용 아이템"
+
+    # 어떤 재화에 속한 아이템인지(나중에 정산/보상용으로 사용 가능)
+    cur = await get_currency_by_identifier(inter.guild.id, currency_identifier)
+    if not cur:
+        await send_reply(
+            inter,
+            f"`{currency_identifier}` 에 해당하는 재화를 찾을 수 없습니다. `/재화`로 확인해보세요.",
+            ephemeral=True,
+        )
+        return
+
+    # 가격 = 0, 재고 = None(무제한), is_shop = False → 상점 목록에는 안 뜸
+    item_id = await add_item(
+        inter.guild.id,
+        name,
+        0,              # 가격 0
+        desc,           # 설명
+        cur["id"],      # 기준 재화
+        stock=None,     # 무제한
+        is_shop=False,  # 상점에는 보이지 않음
+    )
+
+    await send_reply(
+        inter,
+        f"✅ 관리자 전용 아이템 추가 완료!\n"
+        f"- ID: {item_id}\n"
+        f"- 이름: {name}\n"
+        f"- 설명: {desc}\n"
+        f"- 기준 재화: {cur['name']} (`{cur['code']}`)\n"
+        f"- 상점에는 표시되지 않으며, 보상/이벤트/정산 등으로만 지급할 수 있습니다.",
+        ephemeral=True,
+    )
 
 # =========================================================
 # 8. 낚시 전용 아이템 추가 + 낚시 확률 + 낚시
@@ -1645,15 +1824,43 @@ async def slash_add_fishing_item(
         )
         return
 
-    # 가격=0, 재고=None(무제한), is_shop=False → 상점 목록에는 안 뜸
+    # ✅ 같은 이름의 아이템이 이미 있으면 "재사용"
+    existing = await get_item_by_name(inter.guild.id, name.strip())
+    if existing:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                UPDATE items
+                   SET price = 0,
+                       description = ?,
+                       stock = NULL,
+                       is_shop = 0,
+                       currency_id = ?
+                 WHERE id = ?
+                """,
+                (desc, cur["id"], existing["id"]),
+            )
+            await db.commit()
+
+        await send_reply(
+            inter,
+            f"♻ 이미 존재하는 아이템 **{existing['name']}** 을(를) 낚시 전용 아이템으로 설정했습니다.\n"
+            f"- ID: {existing['id']}\n"
+            f"- 설명: {desc}\n"
+            f"- (상점에는 보이지 않고, 낚시/인벤토리에서만 사용됩니다.)",
+            ephemeral=True,
+        )
+        return
+
+    # ✅ 없으면 새로 생성
     item_id = await add_item(
         inter.guild.id,
         name,
         0,
         desc,
         cur["id"],
-        stock=None,
-        is_shop=False,
+        stock=None,   # 무제한
+        is_shop=False # 상점에는 안 보임
     )
 
     await send_reply(
@@ -1665,6 +1872,8 @@ async def slash_add_fishing_item(
         f"- (상점에는 보이지 않으며, 낚시/인벤토리에서만 사용됩니다.)",
         ephemeral=True,
     )
+
+
 
 
 @bot.tree.command(
@@ -1711,49 +1920,40 @@ async def slash_set_fishing_chance(
         item_id = await add_item(
             inter.guild.id,
             name,
-            0,                    # 가격 0
-            auto_desc,            # 설명
-            main_currency_id,     # 기준 재화
-            stock=None,           # 무제한
-            is_shop=False,        # 상점에는 안 보임
+            0,
+            auto_desc,
+            main_currency_id,
+            stock=None,
+            is_shop=False,
         )
         item = await get_item_by_id(inter.guild.id, item_id)
         created_new = True
 
-    # 2) 이 길드의 모든 낚시 룻 + 아이템 이름 한 번에 가져오기
+    # 2) 이 길드의 모든 낚시 룻을 불러와서
+    #    - 현재 아이템(item.id)의 기존 확률 합
+    #    - 다른 아이템들의 확률 합을 분리해서 계산
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            """
-            SELECT f.id, f.item_id, f.chance, i.name
-            FROM fishing_loot f
-            JOIN items i ON f.item_id = i.id
-            WHERE f.guild_id = ?
-            """,
+            "SELECT id, item_id, chance FROM fishing_loot WHERE guild_id = ?",
             (inter.guild.id,),
         )
         rows = await cursor.fetchall()
         await cursor.close()
 
-    other_total = 0.0      # 지금 설정 중인 이름을 제외한 나머지 확률 합
-    old_chance = 0.0       # 이 이름의 기존 확률(있으면)
-    duplicate_ids = []     # 같은 이름인데 item_id가 다른 낚시 룻 id들
+    other_total = 0.0
+    old_sum_for_this = 0.0
+    ids_to_delete_for_this_item: list[int] = []
 
     for row in rows:
         c = float(row["chance"])
-        row_name = row["name"]
-        row_item_id = row["item_id"]
-
-        if row_name == item["name"]:
-            # 같은 이름의 낚시 아이템들 → 1개만 남기고 나머지는 지울 예정
-            old_chance = c  # 여러 개였어도 마지막 것만 표시용으로 사용
-            if row_item_id != item["id"]:
-                duplicate_ids.append(row["id"])
+        if row["item_id"] == item["id"]:
+            old_sum_for_this += c
+            ids_to_delete_for_this_item.append(row["id"])
         else:
-            # 다른 이름의 아이템은 그냥 합산
             other_total += c
 
-    # 3) 새 확률 반영 후 전체 합 체크
+    # 3) 새 확률 반영 후 전체 합 체크 (이 아이템 기존 확률은 전부 버리고 새 값만 사용)
     new_total = other_total + chance
     if new_total > 100.0 + 1e-6:
         await send_reply(
@@ -1765,21 +1965,25 @@ async def slash_set_fishing_chance(
         )
         return
 
-    # 4) 같은 이름인데 다른 item_id를 가진 낚시 룻은 전부 삭제 (중복 정리)
-    if duplicate_ids:
+    # 4) 이 아이템에 대한 예전 레코드는 전부 삭제 → 중복 제거
+    if ids_to_delete_for_this_item:
         async with aiosqlite.connect(DB_PATH) as db:
-            for fid in duplicate_ids:
+            for fid in ids_to_delete_for_this_item:
                 await db.execute("DELETE FROM fishing_loot WHERE id = ?", (fid,))
             await db.commit()
 
-    # 5) 이 아이템(item_id 하나)에 대한 확률을 upsert
+    # 5) 깔끔하게 1줄만 다시 넣기
     await upsert_fishing_loot(inter.guild.id, item["id"], chance)
 
     total_after = new_total
     miss = max(0.0, 100.0 - total_after)
 
     created_msg = " (※ 새 낚시 전용 아이템 자동 생성)" if created_new else ""
-    old_msg = f"\n- 이전 확률(중복 중 하나 기준): {old_chance:.2f}%" if old_chance > 0 else ""
+    old_msg = (
+        f"\n- 이전 확률(이 아이템 전체 합): {old_sum_for_this:.2f}%"
+        if old_sum_for_this > 0
+        else ""
+    )
 
     await send_reply(
         inter,
@@ -1790,6 +1994,7 @@ async def slash_set_fishing_chance(
         f"- 나머지 확률(꽝): {miss:.2f}%",
         ephemeral=True,
     )
+
 
 
 
@@ -1998,6 +2203,115 @@ async def slash_settle(
         f"- 재화: {cur['name']} (`{cur['code']}`)\n"
         f"- 변화량: {amount}\n"
         f"- 정산 후 소지금: {new_balance} {cur['name']}",
+        ephemeral=False,
+    )
+
+@bot.tree.command(
+    name="정산아이템",
+    description="특정 유저에게 아이템을 지급하거나 회수합니다. (관리자)",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    member="아이템을 줄(또는 회수할) 사용자",
+    item_name="아이템 이름 (items 기준 이름)",
+    quantity="지급(+), 회수(-)할 개수 (0 제외)",
+)
+async def slash_settle_item(
+    inter: discord.Interaction,
+    member: discord.Member,
+    item_name: str,
+    quantity: int,
+):
+    # 서버 안에서만 사용, 채널 제한 없음 (정산과 동일)
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
+
+    if quantity == 0:
+        await send_reply(inter, "0개는 정산할 수 없어요. 양수(지급) 또는 음수(회수)를 입력해주세요.", ephemeral=True)
+        return
+
+    name = item_name.strip()
+    item = await get_item_by_name(inter.guild.id, name)
+    if not item:
+        await send_reply(
+            inter,
+            f"`{name}` 이름의 아이템을 찾을 수 없습니다.\n"
+            "`/아이템추가`, `/이벤트아이템추가`, `/낚시아이템추가` 등으로 먼저 아이템을 만들어 주세요.",
+            ephemeral=True,
+        )
+        return
+
+    user = await get_or_create_user(inter.guild.id, member.id)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # 현재 인벤토리 보유량 확인
+        cursor = await db.execute(
+            "SELECT id, quantity FROM inventories WHERE user_id = ? AND item_id = ?",
+            (user["id"], item["id"]),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+        if quantity > 0:
+            # 지급
+            if row:
+                inv_id, have_qty = row
+                await db.execute(
+                    "UPDATE inventories SET quantity = ? WHERE id = ?",
+                    (have_qty + quantity, inv_id),
+                )
+            else:
+                await db.execute(
+                    "INSERT INTO inventories (user_id, item_id, quantity) VALUES (?, ?, ?)",
+                    (user["id"], item["id"], quantity),
+                )
+        else:
+            # 회수 (quantity < 0)
+            if not row:
+                await send_reply(
+                    inter,
+                    f"{member.display_name} 님 인벤토리에 `{item['name']}` 이(가) 없습니다. 회수할 수 없어요.",
+                    ephemeral=True,
+                )
+                return
+
+            inv_id, have_qty = row
+            need = -quantity  # 회수하려는 개수
+
+            if have_qty < need:
+                await send_reply(
+                    inter,
+                    f"회수하려는 개수가 보유량보다 많아요.\n"
+                    f"- 보유: {have_qty}개\n"
+                    f"- 회수 시도: {need}개",
+                    ephemeral=True,
+                )
+                return
+
+            new_qty = have_qty - need
+            if new_qty > 0:
+                await db.execute(
+                    "UPDATE inventories SET quantity = ? WHERE id = ?",
+                    (new_qty, inv_id),
+                )
+            else:
+                await db.execute(
+                    "DELETE FROM inventories WHERE id = ?",
+                    (inv_id,),
+                )
+
+        await db.commit()
+
+    action = "지급" if quantity > 0 else "회수"
+    abs_q = abs(quantity)
+
+    await send_reply(
+        inter,
+        f"✅ 아이템 정산 완료 ({action})\n"
+        f"- 대상: {member.mention}\n"
+        f"- 아이템: {item['name']}\n"
+        f"- 개수 변화: {quantity:+}개",
         ephemeral=False,
     )
 
