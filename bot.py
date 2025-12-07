@@ -1884,7 +1884,7 @@ async def slash_fishing(inter: discord.Interaction):
     if current_count >= MAX_FISH_PER_DAY:
         await send_reply(
             inter,
-            f"🎣 오늘은 이미 **{MAX_FISH_PER_DAY}번** 낚시를 했어요! (한국 시간 기준)\n"
+            f"🎣 오늘은 이미 **{MAX_FISH_PER_DAY}번** 낚시를 했어요!\n"
             f"내일 다시 낚시해 주세요 😊",
             ephemeral=True,
         )
