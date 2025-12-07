@@ -1669,15 +1669,18 @@ async def slash_add_fishing_item(
 
 @bot.tree.command(
     name="낚시확률",
-    description="낚시로 얻을 수 있는 아이템과 확률(%)을 설정합니다. (관리자)"
+    description="낚시로 얻을 수 있는 아이템과 확률(%)을 설정합니다. (관리자)",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
-    item_name="낚시로 얻을 아이템 이름 (이미 존재하면 확률 수정만 가능)",
+    item_name="낚시로 얻을 아이템 이름 (존재하지 않으면 자동 생성, 존재하면 확률만 변경)",
     chance="획득 확률(%) - 소수 가능, 예: 0.5, 10, 12.34 등",
 )
-async def slash_set_fishing_chance(inter: discord.Interaction, item_name: str, chance: float):
-
+async def slash_set_fishing_chance(
+    inter: discord.Interaction,
+    item_name: str,
+    chance: float,
+):
     if not await ensure_channel_inter(inter, "admin"):
         return
 
@@ -1687,75 +1690,107 @@ async def slash_set_fishing_chance(inter: discord.Interaction, item_name: str, c
 
     name = item_name.strip()
 
-    # 🔎 1) 해당 이름의 아이템이 이미 존재하는지 확인
+    # 1) 아이템 찾기 (있으면 그대로, 없으면 자동 생성)
     item = await get_item_by_name(inter.guild.id, name)
-
-    # 🔎 2) 이미 낚시 확률 테이블에 등록된 아이템인지 검사
-    loot_list = await get_fishing_loot(inter.guild.id)
-    existing_ids = {row["item_id"] for row in loot_list}
-
-    if item and item["id"] in existing_ids:
-        # 이미 등록된 아이템이면 → "중복 등록 불가" 처리
-        await send_reply(
-            inter,
-            f"❌ `{name}` 은(는) 이미 낚시 확률에 등록된 아이템입니다.\n"
-            f"기존 확률을 수정하려면 같은 이름으로 다시 `/낚시확률` 을 사용하세요.",
-            ephemeral=True
-        )
-        return
-
     created_new = False
 
-    # 🔥 3) 아이템이 존재하지 않으면 자동 생성
     if not item:
         settings = await get_or_create_guild_settings(inter.guild.id)
         main_currency_id = settings["main_currency_id"]
 
-        auto_desc = f"낚시 자동 생성 아이템 ({name})"
+        if main_currency_id is None:
+            await send_reply(
+                inter,
+                "이 서버에 메인 재화가 아직 설정되지 않아 자동으로 낚시 아이템을 생성할 수 없습니다.\n"
+                "`/재화`로 재화를 확인하고, 기본 설정을 먼저 마쳐 주세요.",
+                ephemeral=True,
+            )
+            return
 
+        auto_desc = f"낚시 전용 자동 생성 아이템 ({name})"
         item_id = await add_item(
             inter.guild.id,
             name,
-            0,
-            auto_desc,
-            main_currency_id,
-            stock=None,
-            is_shop=False
+            0,                    # 가격 0
+            auto_desc,            # 설명
+            main_currency_id,     # 기준 재화
+            stock=None,           # 무제한
+            is_shop=False,        # 상점에는 안 보임
         )
         item = await get_item_by_id(inter.guild.id, item_id)
         created_new = True
 
-    # 🔢 4) 현재 확률 총합 계산
-    total_other = sum(
-        float(row["chance"])
-        for row in loot_list
-        if row["item_id"] != item["id"]
-    )
+    # 2) 이 길드의 모든 낚시 룻 + 아이템 이름 한 번에 가져오기
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT f.id, f.item_id, f.chance, i.name
+            FROM fishing_loot f
+            JOIN items i ON f.item_id = i.id
+            WHERE f.guild_id = ?
+            """,
+            (inter.guild.id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
 
-    if total_other + chance > 100:
+    other_total = 0.0      # 지금 설정 중인 이름을 제외한 나머지 확률 합
+    old_chance = 0.0       # 이 이름의 기존 확률(있으면)
+    duplicate_ids = []     # 같은 이름인데 item_id가 다른 낚시 룻 id들
+
+    for row in rows:
+        c = float(row["chance"])
+        row_name = row["name"]
+        row_item_id = row["item_id"]
+
+        if row_name == item["name"]:
+            # 같은 이름의 낚시 아이템들 → 1개만 남기고 나머지는 지울 예정
+            old_chance = c  # 여러 개였어도 마지막 것만 표시용으로 사용
+            if row_item_id != item["id"]:
+                duplicate_ids.append(row["id"])
+        else:
+            # 다른 이름의 아이템은 그냥 합산
+            other_total += c
+
+    # 3) 새 확률 반영 후 전체 합 체크
+    new_total = other_total + chance
+    if new_total > 100.0 + 1e-6:
         await send_reply(
             inter,
-            f"❌ 확률을 {chance:.2f}% 로 설정하면 전체 합이 {total_other + chance:.2f}% 로 100%를 초과합니다.",
-            ephemeral=True
+            f"❌ 이 아이템을 {chance:.2f}% 로 설정하면 전체 확률 합이 "
+            f"{new_total:.2f}% > 100% 가 됩니다.\n"
+            "확률을 줄여서 다시 시도해 주세요.",
+            ephemeral=True,
         )
         return
 
-    # 📝 5) 확률 저장
+    # 4) 같은 이름인데 다른 item_id를 가진 낚시 룻은 전부 삭제 (중복 정리)
+    if duplicate_ids:
+        async with aiosqlite.connect(DB_PATH) as db:
+            for fid in duplicate_ids:
+                await db.execute("DELETE FROM fishing_loot WHERE id = ?", (fid,))
+            await db.commit()
+
+    # 5) 이 아이템(item_id 하나)에 대한 확률을 upsert
     await upsert_fishing_loot(inter.guild.id, item["id"], chance)
 
-    miss = 100 - (total_other + chance)
+    total_after = new_total
+    miss = max(0.0, 100.0 - total_after)
 
     created_msg = " (※ 새 낚시 전용 아이템 자동 생성)" if created_new else ""
+    old_msg = f"\n- 이전 확률(중복 중 하나 기준): {old_chance:.2f}%" if old_chance > 0 else ""
 
     await send_reply(
         inter,
         f"✅ 낚시 확률 설정 완료!{created_msg}\n"
         f"- 아이템: {item['name']}\n"
-        f"- 설정 확률: {chance:.2f}%\n"
-        f"- 아이템 확률 합: {total_other + chance:.2f}%\n"
-        f"- 꽝 확률: {miss:.2f}%",
-        ephemeral=True
+        f"- 설정 확률: {chance:.2f}%{old_msg}\n"
+        f"- 현재 전체 아이템 확률 합: {total_after:.2f}%\n"
+        f"- 나머지 확률(꽝): {miss:.2f}%",
+        ephemeral=True,
     )
+
 
 
 
