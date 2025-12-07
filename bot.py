@@ -56,6 +56,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 synced = False
 
 
+def get_today_kst_str() -> str:
+    """한국 시간(KST) 기준 오늘 날짜를 YYYY-MM-DD 문자열로 반환"""
+    return datetime.datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+today_kst = get_today_kst_str()
 # =========================================================
 # 공통 유틸 (Interaction 기반)
 # =========================================================
@@ -820,14 +824,10 @@ async def slash_set_main_currency_name(inter: discord.Interaction, new_name: str
 
 @bot.tree.command(name="출석", description="출석하여 1d50 보상을 받습니다.")
 async def slash_attend(inter: discord.Interaction):
-    if not await ensure_channel_inter(inter, "attend"):
-        return
-
-    settings = await get_or_create_guild_settings(inter.guild.id)
-    attend_currency_id = settings["attend_currency_id"]
-
     user = await get_or_create_user(inter.guild.id, inter.user.id)
-    today_str = datetime.date.today().isoformat()
+    # 기존: today_str = datetime.date.today().isoformat()
+    today_str = get_today_kst_str()   # ✅ 한국 시간 기준
+
 
     if user["last_attend_date"] == today_str:
         await send_reply(
@@ -876,7 +876,7 @@ async def slash_bonus_attend(inter: discord.Interaction):
         return
 
     # 오늘 날짜 (기존 /출석과 동일하게 사용)
-    today_str = datetime.date.today().isoformat()
+    today_str = get_today_kst_str()
 
     settings = await get_or_create_guild_settings(inter.guild.id)
     attend_currency_id = settings["attend_currency_id"]
@@ -2296,7 +2296,6 @@ async def slash_fishing(inter: discord.Interaction):
     # 2) 유저 정보 + 한국 시간(KST) 기준 오늘 날짜
     user = await get_or_create_user(inter.guild.id, inter.user.id)
 
-    today_kst = datetime.datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
     MAX_FISH_PER_DAY = 3
 
     # 3) 오늘 낚시 횟수 확인
