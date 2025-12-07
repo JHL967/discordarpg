@@ -1,1 +1,5 @@
-TOKEN = "MTQ0NjcwNTI0ODA0NjY4MjE4NA.GjwJSH.3q9C4Uo7SWZ00QuUDumsUyPG0Aiw5P-7WYEzIs"
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # .env 파일을 읽어서 환경 변수로 등록
+TOKEN = os.getenv("DISCORD_TOKEN")
