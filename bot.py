@@ -1533,7 +1533,7 @@ async def slash_purge_item_cmd(inter: discord.Interaction, item_name: str):
     """
 
     # 위험한 명령어니까 관리자용 채널에서만 사용하도록 제한
-    if not await ensure_channel_inter(inter, "admin"):
+    if not await ensure_channel_inter(inter, "shop"):
         return
 
     name = item_name.strip()
