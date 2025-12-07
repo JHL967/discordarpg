@@ -71,25 +71,24 @@ async def send_reply(
     embed: discord.Embed | None = None,
     ephemeral: bool = True,
 ):
-    """
-    Interaction 응답 헬퍼.
-    - 이미 응답했으면 followup.send 사용
-    - 아직이면 response.send_message 사용
-    - 404 Unknown interaction(10062) 은 조용히 무시해서
-      명령은 실행되었는데도 에러 로그가 터지는 상황을 방지
+    """Interaction 응답 도우미
+
+    - 이미 응답했으면 followup.send
+    - 아직이면 response.send_message
+    - Unknown Interaction(404) 이 떠도 봇이 죽지 않도록 예외 처리
     """
     try:
         if inter.response.is_done():
             await inter.followup.send(content=content, embed=embed, ephemeral=ephemeral)
         else:
             await inter.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
-    except discord.NotFound as e:
-        # 10062: Unknown interaction → 토큰이 만료되었거나 다른 이유로 유효하지 않을 때
-        # DB 작업 등은 이미 끝난 상태일 수 있으니, 여기서는 그냥 로그만 찍고 무시
-        print(f"⚠️ send_reply: Unknown interaction (아마 응답 시간 초과/재시작 등) → {e}")
+    except discord.NotFound:
+        # 보통 응답이 3초 이상 지연되거나, 인터렉션이 만료됐을 때 나는 에러
+        print("[WARN] send_reply: Unknown interaction (404) – 이미 만료된 요청, 무시합니다.")
     except Exception as e:
-        # 다른 예외는 디버깅용으로만 찍어두고, 봇이 죽지 않게 함
-        print(f"⚠️ send_reply 중 예외 발생: {e}")
+        # 어떤 이유든 여기서 막아서 봇이 죽지 않게
+        print(f"[ERROR] send_reply 중 예외 발생: {e!r}")
+
 
 
 # ---- 관리자용 봇채널 테이블 (command_channels) ----
@@ -364,6 +363,49 @@ async def on_ready():
         synced = True
 
     print(f"✅ DB 초기화 및 채널 테이블 준비 완료: {DB_PATH}")
+
+# =========================================================
+# 전역 에러 핸들러 (봇이 예외로 죽지 않도록)
+# =========================================================
+
+@bot.event
+async def on_error(event_method, *args, **kwargs):
+    import traceback
+    print(f"[on_error] 이벤트 {event_method} 처리 중 예외 발생")
+    traceback.print_exc()
+
+@bot.tree.error
+async def on_app_command_error(
+    inter: discord.Interaction,
+    error: app_commands.AppCommandError,
+):
+    import traceback
+    print(f"[slash-error] /{getattr(inter.command, 'name', '?')} 실행 중 예외: {error!r}")
+    traceback.print_exc()
+
+    # 이미 send_reply에서 NotFound를 잡고 있지만, 혹시 빠져나온 경우 한 번 더 필터
+    if isinstance(error, app_commands.CommandInvokeError) and isinstance(error.original, discord.NotFound):
+        # 유저 쪽 응답은 굳이 안 해도 되지만, 하고 싶으면:
+        try:
+            await send_reply(
+                inter,
+                "처리가 너무 늦어서 요청이 만료됐어요. 한 번만 다시 시도해 주세요!",
+                ephemeral=True,
+            )
+        except Exception:
+            pass
+        return
+
+    # 그 외 예외는 “알려만 주는” 메시지
+    try:
+        await send_reply(
+            inter,
+            "명령어 처리 중 오류가 발생했어요. 개발자에게 스크린 로그를 전달해 주세요.",
+            ephemeral=True,
+        )
+    except Exception:
+        # 여기서 또 죽으면 안 되니까 마지막 안전망
+        pass
 
 
 # =========================================================
