@@ -2,6 +2,7 @@
 
 import random
 import datetime
+from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands
@@ -35,6 +36,8 @@ from db import (
     get_sell_item_by_name,
     upsert_fishing_loot,
     get_fishing_loot,
+    get_fishing_daily_count,       # ✅ 추가
+    increment_fishing_daily_count, # ✅ 추가
 )
 
 # =========================================================
@@ -1666,18 +1669,15 @@ async def slash_add_fishing_item(
 
 @bot.tree.command(
     name="낚시확률",
-    description="낚시로 얻을 수 있는 아이템과 확률(%)을 설정합니다. (관리자)",
+    description="낚시로 얻을 수 있는 아이템과 확률(%)을 설정합니다. (관리자)"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
-    item_name="낚시로 얻을 아이템 이름 (존재하지 않으면 자동으로 낚시 전용 아이템 생성)",
+    item_name="낚시로 얻을 아이템 이름 (이미 존재하면 확률 수정만 가능)",
     chance="획득 확률(%) - 소수 가능, 예: 0.5, 10, 12.34 등",
 )
-async def slash_set_fishing_chance(
-    inter: discord.Interaction,
-    item_name: str,
-    chance: float,
-):
+async def slash_set_fishing_chance(inter: discord.Interaction, item_name: str, chance: float):
+
     if not await ensure_channel_inter(inter, "admin"):
         return
 
@@ -1687,75 +1687,76 @@ async def slash_set_fishing_chance(
 
     name = item_name.strip()
 
-    # 1) 먼저 아이템을 찾아보고
+    # 🔎 1) 해당 이름의 아이템이 이미 존재하는지 확인
     item = await get_item_by_name(inter.guild.id, name)
+
+    # 🔎 2) 이미 낚시 확률 테이블에 등록된 아이템인지 검사
+    loot_list = await get_fishing_loot(inter.guild.id)
+    existing_ids = {row["item_id"] for row in loot_list}
+
+    if item and item["id"] in existing_ids:
+        # 이미 등록된 아이템이면 → "중복 등록 불가" 처리
+        await send_reply(
+            inter,
+            f"❌ `{name}` 은(는) 이미 낚시 확률에 등록된 아이템입니다.\n"
+            f"기존 확률을 수정하려면 같은 이름으로 다시 `/낚시확률` 을 사용하세요.",
+            ephemeral=True
+        )
+        return
 
     created_new = False
 
-    # 2) 없으면 자동으로 "낚시 전용 아이템" 생성
+    # 🔥 3) 아이템이 존재하지 않으면 자동 생성
     if not item:
         settings = await get_or_create_guild_settings(inter.guild.id)
         main_currency_id = settings["main_currency_id"]
 
-        if main_currency_id is None:
-            await send_reply(
-                inter,
-                "이 서버에 메인 재화가 아직 설정되지 않아 자동으로 낚시 아이템을 생성할 수 없습니다.\n"
-                "`/재화`로 재화를 확인하고, 기본 설정을 먼저 마쳐 주세요.",
-                ephemeral=True,
-            )
-            return
+        auto_desc = f"낚시 자동 생성 아이템 ({name})"
 
-        auto_desc = f"낚시 전용 자동 생성 아이템 ({name})"
         item_id = await add_item(
             inter.guild.id,
             name,
-            0,                    # 가격 0
-            auto_desc,            # 설명
-            main_currency_id,     # 아무 재화나 하나 필요해서 메인 재화 사용
-            stock=None,           # 무제한
-            is_shop=False,        # 상점에는 보이지 않음
+            0,
+            auto_desc,
+            main_currency_id,
+            stock=None,
+            is_shop=False
         )
-        # 방금 만든 아이템 정보 다시 읽기
         item = await get_item_by_id(inter.guild.id, item_id)
         created_new = True
 
-    # 3) 기존 낚시 확률 목록 불러와서 "다른 아이템 합계" 계산
-    existing = await get_fishing_loot(inter.guild.id)
-    other_total = 0.0
-    for row in existing:
-        if row["item_id"] == item["id"]:
-            continue
-        other_total += float(row["chance"])
+    # 🔢 4) 현재 확률 총합 계산
+    total_other = sum(
+        float(row["chance"])
+        for row in loot_list
+        if row["item_id"] != item["id"]
+    )
 
-    new_total = other_total + chance
-    if new_total > 100.0 + 1e-6:
+    if total_other + chance > 100:
         await send_reply(
             inter,
-            f"❌ 이 아이템을 {chance:.2f}% 로 설정하면 전체 확률 합이 "
-            f"{new_total:.2f}% > 100% 가 됩니다.\n"
-            "확률을 줄여서 다시 시도해 주세요.",
-            ephemeral=True,
+            f"❌ 확률을 {chance:.2f}% 로 설정하면 전체 합이 {total_other + chance:.2f}% 로 100%를 초과합니다.",
+            ephemeral=True
         )
         return
 
-    # 4) upsert로 등록/수정
+    # 📝 5) 확률 저장
     await upsert_fishing_loot(inter.guild.id, item["id"], chance)
 
-    total_after = new_total
-    miss = max(0.0, 100.0 - total_after)
+    miss = 100 - (total_other + chance)
 
-    created_msg = " (※ 존재하지 않아 자동으로 낚시 전용 아이템을 생성했습니다.)" if created_new else ""
+    created_msg = " (※ 새 낚시 전용 아이템 자동 생성)" if created_new else ""
 
     await send_reply(
         inter,
         f"✅ 낚시 확률 설정 완료!{created_msg}\n"
         f"- 아이템: {item['name']}\n"
         f"- 설정 확률: {chance:.2f}%\n"
-        f"- 현재 전체 아이템 확률 합: {total_after:.2f}%\n"
-        f"- 나머지 확률(꽝): {miss:.2f}%",
-        ephemeral=True,
+        f"- 아이템 확률 합: {total_other + chance:.2f}%\n"
+        f"- 꽝 확률: {miss:.2f}%",
+        ephemeral=True
     )
+
 
 
 @bot.tree.command(
@@ -1826,24 +1827,47 @@ async def slash_fishing(inter: discord.Interaction):
     if not await ensure_channel_inter(inter, "fish"):
         return
 
+    # 1) 낚시 가능한 아이템 목록 확인
     loot = await get_fishing_loot(inter.guild.id)
     if not loot:
         await send_reply(
             inter,
-            "아직 낚시로 얻을 수 있는 아이템이 설정되지 않았어요.\n관리자가 `/낚시아이템추가`, `/낚시확률`로 먼저 설정해야 합니다.",
+            "아직 낚시로 얻을 수 있는 아이템이 설정되지 않았어요.\n"
+            "관리자가 `/낚시아이템추가`, `/낚시확률`로 먼저 설정해야 합니다.",
             ephemeral=True,
         )
         return
 
+    # 2) 유저 정보 + 한국 시간(KST) 기준 오늘 날짜
+    user = await get_or_create_user(inter.guild.id, inter.user.id)
+
+    today_kst = datetime.datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+    MAX_FISH_PER_DAY = 3
+
+    # 3) 오늘 낚시 횟수 확인
+    current_count = await get_fishing_daily_count(inter.guild.id, user["id"], today_kst)
+    if current_count >= MAX_FISH_PER_DAY:
+        await send_reply(
+            inter,
+            f"🎣 오늘은 이미 **{MAX_FISH_PER_DAY}번** 낚시를 했어요! (한국 시간 기준)\n"
+            f"내일 다시 낚시해 주세요 😊",
+            ephemeral=True,
+        )
+        return
+
+    # 4) 여기서 1회 소모 처리 (성공/실패 상관없이 시도만 하면 카운트)
+    new_count = await increment_fishing_daily_count(inter.guild.id, user["id"], today_kst)
+
+    # 5) 전체 아이템 확률 합 계산
     total = 0.0
     for row in loot:
         total += float(row["chance"])
-
     total = min(total, 100.0)  # 혹시 100 조금 넘는 오차 방어
-    # 0 ~ 100 구간에서 랜덤
+
+    # 6) 0 ~ 100 구간에서 랜덤
     roll = random.random() * 100.0
 
-    # 누적 확률로 어떤 아이템이 당첨되는지 결정
+    # 7) 누적 확률로 어떤 아이템이 당첨되는지 결정
     current = 0.0
     chosen = None
     for row in loot:
@@ -1855,19 +1879,18 @@ async def slash_fishing(inter: discord.Interaction):
             break
         current += c
 
-    user = await get_or_create_user(inter.guild.id, inter.user.id)
-
     if chosen is None or roll >= total:
         # 꽝
         await send_reply(
             inter,
             f"🎣 낚시 결과: **꽝!**\n"
-            f"({roll:.2f}% 의 랜덤 값, 아이템 확률 합: {total:.2f}%)",
+            f"(랜덤 값: {roll:.2f}% / 아이템 확률 합: {total:.2f}% )\n"
+            f"오늘 사용한 낚시 횟수: {new_count}/{MAX_FISH_PER_DAY}",
             ephemeral=False,
         )
         return
 
-    # 당첨 아이템 인벤토리에 +1
+    # 8) 당첨 아이템 인벤토리에 +1
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT id, quantity FROM inventories WHERE user_id = ? AND item_id = ?",
@@ -1893,6 +1916,7 @@ async def slash_fishing(inter: discord.Interaction):
         inter,
         f"🎣 낚시 결과: **{chosen['item_name']}** 을(를) 획득했습니다!\n"
         f"(랜덤 값: {roll:.2f} / 아이템 확률: {chosen['chance']:.2f}%)\n"
+        f"오늘 사용한 낚시 횟수: {new_count}/{MAX_FISH_PER_DAY}\n"
         f"획득한 아이템은 인벤토리에 저장되었습니다. `/인벤토리` 로 확인해보세요.",
         ephemeral=False,
     )

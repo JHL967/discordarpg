@@ -150,6 +150,26 @@ async def init_db():
             ON sell_shop_items (guild_id, item_id)
             """
         )
+                # -------------------------------------------------
+        # 낚시 일일 제한 테이블 (유저당 KST 기준 하루 3회)
+        # -------------------------------------------------
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fishing_limits (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,   -- users.id (내부 유저 ID)
+                date        TEXT NOT NULL,      -- 'YYYY-MM-DD' (KST 기준)
+                count       INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_fishing_limits_unique
+            ON fishing_limits (guild_id, user_id, date)
+            """
+        )
 
         # -------------------------------------------------
         # 낚시 확률 테이블
@@ -674,6 +694,86 @@ async def upsert_fishing_loot(
             (guild_id, item_id, chance),
         )
         await db.commit()
+async def get_fishing_daily_count(guild_id: int, db_user_id: int, date_str: str) -> int:
+    """
+    해당 길드/유저/날짜(KST 기준)에 오늘 몇 번 낚시했는지 반환.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT count FROM fishing_limits
+            WHERE guild_id = ? AND user_id = ? AND date = ?
+            """,
+            (guild_id, db_user_id, date_str),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+    return row[0] if row else 0
+
+
+async def increment_fishing_daily_count(guild_id: int, db_user_id: int, date_str: str) -> int:
+    """
+    오늘 낚시 횟수를 1 증가시키고, 증가 후 count 를 반환.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT id, count FROM fishing_limits
+            WHERE guild_id = ? AND user_id = ? AND date = ?
+            """,
+            (guild_id, db_user_id, date_str),
+        )
+        row = await cursor.fetchone()
+
+        if row:
+            limit_id, cnt = row
+            new_cnt = cnt + 1
+            await db.execute(
+                "UPDATE fishing_limits SET count = ? WHERE id = ?",
+                (new_cnt, limit_id),
+            )
+        else:
+            new_cnt = 1
+            await db.execute(
+                """
+                INSERT INTO fishing_limits (guild_id, user_id, date, count)
+                VALUES (?, ?, ?, ?)
+                """,
+                (guild_id, db_user_id, date_str, new_cnt),
+            )
+
+        await db.commit()
+        await cursor.close()
+
+    return new_cnt
+
+
+async def get_or_create_fishing_item_id(guild_id: int, item_name: str):
+    item_name = item_name.strip()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # 🔍 1) 동일한 이름의 아이템이 이미 있는지 확인
+        cursor = await db.execute(
+            "SELECT id FROM items WHERE guild_id = ? AND name = ?",
+            (guild_id, item_name)
+        )
+        row = await cursor.fetchone()
+
+        if row:
+            # 이미 존재하는 아이템 → 새로 만들지 않고 기존 ID 반환
+            return row["id"]
+
+        # 🔥 2) 존재하지 않을 때만 새로 생성
+        cursor = await db.execute(
+            "INSERT INTO items (guild_id, name, description) VALUES (?, ?, ?)",
+            (guild_id, item_name, f"{item_name} (낚시 전용 아이템)")
+        )
+        await db.commit()
+
+        return cursor.lastrowid
 
 
 async def get_fishing_loot(guild_id: int):
