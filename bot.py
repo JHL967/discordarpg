@@ -1440,7 +1440,7 @@ async def slash_add_event_item(
 
 @bot.tree.command(
     name="아이템삭제",
-    description="상점 아이템을 이름으로 삭제합니다. (관리자)",
+    description="상점 목록에서 아이템을 제거합니다. (이미 가진 사람 인벤토리는 유지) (관리자)",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
@@ -1460,25 +1460,115 @@ async def slash_delete_item_cmd(inter: discord.Interaction, item_name: str):
         )
         return
 
+    async with aiosqlite.connect(DB_PATH) as db:
+        # 상점에 노출 중인 같은 이름 아이템들 모두 찾기
+        cursor = await db.execute(
+            """
+            SELECT id, name
+              FROM items
+             WHERE guild_id = ?
+               AND name = ?
+               AND is_shop = 1
+            """,
+            (inter.guild.id, name),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+        if not rows:
+            await send_reply(
+                inter,
+                f"`{name}` 이름의 상점 아이템을 찾을 수 없습니다.\n"
+                "`/상점` 또는 `/이벤트상점`으로 아이템 이름을 다시 확인해 주세요.",
+                ephemeral=True,
+            )
+            return
+
+        # 판매 상점에 등록된 것도 함께 제거
+        item_ids = [r[0] for r in rows]
+        await db.executemany(
+            """
+            DELETE FROM sell_shop_items
+             WHERE guild_id = ?
+               AND item_id = ?
+            """,
+            [(inter.guild.id, iid) for iid in item_ids],
+        )
+
+        # ❗ 실제로 삭제하지 않고, 상점에서만 숨김
+        await db.execute(
+            """
+            UPDATE items
+               SET is_shop = 0
+             WHERE guild_id = ?
+               AND name = ?
+               AND is_shop = 1
+            """,
+            (inter.guild.id, name),
+        )
+
+        await db.commit()
+
+    deleted_count = len(rows)
+    await send_reply(
+        inter,
+        f"🗑 상점 목록에서 `{name}` 아이템 {deleted_count}개를 제거했습니다.\n"
+        f"이미 플레이어가 보유한 아이템은 **인벤토리에 그대로 남습니다.**",
+        ephemeral=True,
+    )
+@bot.tree.command(
+    name="아이템제거",
+    description="잘못 만든 아이템을 DB에서 완전히 삭제합니다. (인벤토리에서도 사라짐 / 관리자)",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    item_name="완전히 삭제할 아이템 이름 (상점/인벤토리 기준 이름 그대로 입력)"
+)
+async def slash_purge_item_cmd(inter: discord.Interaction, item_name: str):
+    """
+    ⚠ 매우 위험한 명령어입니다.
+    - items 테이블의 아이템을 삭제하고
+    - 그 아이템을 가지고 있던 모든 유저의 인벤토리 기록도 사라집니다.
+    이미 배포된 아이템을 '완전 무효화'할 때만 사용하세요.
+    """
+
+    # 위험한 명령어니까 관리자용 채널에서만 사용하도록 제한
+    if not await ensure_channel_inter(inter, "admin"):
+        return
+
+    name = item_name.strip()
+    if not name:
+        await send_reply(
+            inter,
+            "완전히 삭제할 아이템 이름을 입력해주세요.",
+            ephemeral=True,
+        )
+        return
+
     # 이름으로 아이템 찾기
     item = await get_item_by_name(inter.guild.id, name)
     if not item:
         await send_reply(
             inter,
-            f"`{name}` 이름의 아이템을 이 서버 상점에서 찾을 수 없습니다.\n"
-            "`/상점` 또는 `/이벤트상점`으로 아이템 이름을 다시 확인해 주세요.",
+            f"`{name}` 이름의 아이템을 찾을 수 없습니다.\n"
+            "`/상점`, `/이벤트상점`, `/인벤토리` 등에서 정확한 이름을 다시 확인해 주세요.",
             ephemeral=True,
         )
         return
 
-    # 실제 삭제는 여전히 id 기준으로 (DB 헬퍼 재사용)
+    # 실제 삭제: delete_item 헬퍼 사용
+    # (items 에서 삭제되면서, 해당 아이템을 가진 인벤토리도 함께 정리되는 동작)
     await delete_item(inter.guild.id, item["id"])
 
     await send_reply(
         inter,
-        f"🗑 아이템 삭제 완료: [{item['id']}] {item['name']}",
+        f"💣 **완전 삭제 완료!**\n"
+        f"- 대상 아이템: [{item['id']}] {item['name']}\n"
+        f"- 이 아이템을 보유하던 모든 유저의 인벤토리에서도 **모두 제거**되었습니다.\n\n"
+        f"※ 잘못 만든 아이템을 없앨 때만 사용하세요. 되돌릴 수 없습니다.",
         ephemeral=True,
     )
+
 
 
 
