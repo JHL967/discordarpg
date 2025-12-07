@@ -1382,9 +1382,21 @@ async def slash_add_event_item(
         await send_reply(inter, "가격은 0 이상이어야 합니다.", ephemeral=True)
         return
 
-    if stock < 0:
-        await send_reply(inter, "재고는 0 이상이어야 합니다.", ephemeral=True)
+    # 🔹 여기부터 재고 처리 로직 변경 (-1 → 무제한)
+    if stock == -1:
+        stock_value = None   # DB에서 NULL = 무제한
+        stock_text = "제한없음"
+    elif stock >= 0:
+        stock_value = stock
+        stock_text = f"{stock}개"
+    else:
+        await send_reply(
+            inter,
+            "재고는 0 이상이거나, 무제한으로 하고 싶다면 -1을 입력해 주세요.",
+            ephemeral=True,
+        )
         return
+    # 🔹 여기까지 추가
 
     cur = await get_currency_by_identifier(inter.guild.id, currency_identifier)
     if not cur:
@@ -1410,8 +1422,8 @@ async def slash_add_event_item(
         price,
         description,
         cur["id"],
-        stock,
-        is_shop=True,  # 상점용
+        stock_value,      # 🔹 여기도 stock → stock_value 로 변경
+        is_shop=True,     # 상점용
     )
     await send_reply(
         inter,
@@ -1419,10 +1431,11 @@ async def slash_add_event_item(
         f"- ID: {item_id}\n"
         f"- 이름: {name}\n"
         f"- 가격: {price} {cur['name']} (`{cur['code']}`)\n"
-        f"- 초기 재고: {stock}개\n"
+        f"- 초기 재고: {stock_text}\n"   # 🔹 {stock}개 → {stock_text}
         f"- 설명: {description}",
         ephemeral=True,
     )
+
 
 
 @bot.tree.command(
