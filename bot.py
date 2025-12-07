@@ -59,7 +59,6 @@ synced = False
 def get_today_kst_str() -> str:
     """한국 시간(KST) 기준 오늘 날짜를 YYYY-MM-DD 문자열로 반환"""
     return datetime.datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
-today_kst = get_today_kst_str()
 # =========================================================
 # 공통 유틸 (Interaction 기반)
 # =========================================================
@@ -824,11 +823,28 @@ async def slash_set_main_currency_name(inter: discord.Interaction, new_name: str
 
 @bot.tree.command(name="출석", description="출석하여 1d50 보상을 받습니다.")
 async def slash_attend(inter: discord.Interaction):
+    # ✅ 출석 채널에서만 사용
+    if not await ensure_channel_inter(inter, "attend"):
+        return
+
+    # ✅ 출석 재화 ID 가져오기
+    settings = await get_or_create_guild_settings(inter.guild.id)
+    attend_currency_id = settings["attend_currency_id"]
+
+    if attend_currency_id is None:
+        await send_reply(
+            inter,
+            "이 서버에 아직 출석 보상으로 줄 재화가 설정되지 않았어요.\n"
+            "관리자가 `/출석재화설정` 으로 먼저 설정해야 합니다.",
+            ephemeral=True,
+        )
+        return
+
+    # ✅ 유저 정보 + 한국 시간 기준 오늘 날짜
     user = await get_or_create_user(inter.guild.id, inter.user.id)
-    # 기존: today_str = datetime.date.today().isoformat()
-    today_str = get_today_kst_str()   # ✅ 한국 시간 기준
+    today_str = get_today_kst_str()   # 한국 시간 기준 YYYY-MM-DD
 
-
+    # 이미 오늘 출석했는지 체크
     if user["last_attend_date"] == today_str:
         await send_reply(
             inter,
@@ -837,6 +853,7 @@ async def slash_attend(inter: discord.Interaction):
         )
         return
 
+    # 출석 재화 정보 조회
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT name, code FROM currencies WHERE id = ?",
@@ -855,17 +872,8 @@ async def slash_attend(inter: discord.Interaction):
 
     cur_name, cur_code = cur_row
 
-    roll = random.randint(1, 50)
-    new_amount = await change_balance(user["id"], attend_currency_id, roll)
-    await update_user_last_attend(user["id"], today_str)
+    # 1d50 굴려서 지급
 
-    await send_reply(
-        inter,
-        f"🎲 출석 완료! 1d50 → **{roll}** 이(가) 나왔어요.\n"
-        f"획득 재화: **{cur_name}** (`{cur_code}`)\n"
-        f"현재 소지금: **{new_amount} {cur_name}**",
-        ephemeral=False,
-    )
 
 @bot.tree.command(
     name="재출석",
@@ -2297,9 +2305,11 @@ async def slash_fishing(inter: discord.Interaction):
     user = await get_or_create_user(inter.guild.id, inter.user.id)
 
     MAX_FISH_PER_DAY = 3
+    today_str = get_today_kst_str()
 
     # 3) 오늘 낚시 횟수 확인
-    current_count = await get_fishing_daily_count(inter.guild.id, user["id"], today_kst)
+    current_count = await get_fishing_daily_count(inter.guild.id, user["id"], today_str)
+
     if current_count >= MAX_FISH_PER_DAY:
         await send_reply(
             inter,
@@ -2310,7 +2320,8 @@ async def slash_fishing(inter: discord.Interaction):
         return
 
     # 4) 여기서 1회 소모 처리 (성공/실패 상관없이 시도만 하면 카운트)
-    new_count = await increment_fishing_daily_count(inter.guild.id, user["id"], today_kst)
+    new_count = await increment_fishing_daily_count(inter.guild.id, user["id"], today_str)
+
 
     # 5) 전체 아이템 확률 합 계산
     total = 0.0
