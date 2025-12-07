@@ -872,7 +872,22 @@ async def slash_attend(inter: discord.Interaction):
 
     cur_name, cur_code = cur_row
 
-    # 1d50 굴려서 지급
+    # ✅ 1d50 굴려서 보상 지급
+    roll = random.randint(1, 50)
+    new_amount = await change_balance(user["id"], attend_currency_id, roll)
+
+    # ✅ 오늘 날짜를 출석일로 기록
+    await update_user_last_attend(user["id"], today_str)
+
+    # ✅ 결과 메시지 전송
+    await send_reply(
+        inter,
+        f"🎲 출석 완료! 1d50 → **{roll}** 이(가) 나왔어요.\n"
+        f"획득 재화: **{cur_name}** (`{cur_code}`)\n"
+        f"현재 소지금: **{new_amount} {cur_name}**",
+        ephemeral=False,
+    )
+
 
 
 @bot.tree.command(
