@@ -2169,13 +2169,6 @@ async def slash_list_admin_items(inter: discord.Interaction):
             inline=False,
         )
 
-    if other_items:
-        embed.add_field(
-            name="📦 기타 숨김 아이템",
-            value="\n".join(fmt_item(r) for r in other_items)[:1024],
-            inline=False,
-        )
-
     await send_reply(inter, embed=embed, ephemeral=True)
 
 
