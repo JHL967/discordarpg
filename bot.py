@@ -909,16 +909,14 @@ async def slash_bonus_attend(inter: discord.Interaction):
     if not await ensure_channel_inter(inter, "attend"):
         return
 
-    # 오늘 날짜 (기존 /출석과 동일하게 사용)
     today_str = get_today_kst_str()
 
     settings = await get_or_create_guild_settings(inter.guild.id)
     attend_currency_id = settings["attend_currency_id"]
 
-    # 기본 유저 정보
     user = await get_or_create_user(inter.guild.id, inter.user.id)
 
-    # 1) 오늘 아직 일반 출석을 안 했으면 /재출석 사용 불가
+    # 1) 아직 오늘 기본 출석을 안 했으면 불가
     if user["last_attend_date"] != today_str:
         await send_reply(
             inter,
@@ -929,13 +927,18 @@ async def slash_bonus_attend(inter: discord.Interaction):
         return
 
     # 2) 오늘 이미 재출석을 한 적이 있다면 또 못 쓰게
-    if user.get("last_bonus_attend_date") == today_str:
+    #    (Row 객체라 .get() 안 되고, 키로 바로 접근)
+    last_bonus = user["last_bonus_attend_date"]
+    if last_bonus == today_str:
         await send_reply(
             inter,
             "오늘은 이미 `/재출석` 을 사용했어요.\n내일 다시 사용해 주세요 😊",
             ephemeral=True,
         )
         return
+
+    # --- 이하 나머지 코드는 그대로 사용 (행운 아이템 확인/소모, 보상 지급 등) ---
+
 
     # 3) 인벤토리에서 '출석 주사위' 또는 '행운의 꼬리' 보유 여부 확인
     lucky_items = ["출석 주사위", "행운의 꼬리"]
