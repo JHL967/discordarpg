@@ -2641,6 +2641,44 @@ async def slash_register_pet(
         ephemeral=True,
     )
 
+@bot.tree.command(
+    name="펫삭제",
+    description="도감에서 특정 펫을 삭제합니다. (관리자 전용)"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    name="삭제할 펫 이름"
+)
+async def slash_delete_pet(inter: discord.Interaction, name: str):
+    # 관리자 전용 채널 제한 (원하면)
+    if not await ensure_channel_inter(inter, "admin"):
+        return
+
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
+
+    guild_id = inter.guild.id
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT id FROM pets WHERE guild_id = ? AND name = ?",
+            (guild_id, name)
+        )
+        row = await cursor.fetchone()
+
+        if not row:
+            await send_reply(inter, f"❌ `{name}` 이름의 펫이 존재하지 않습니다.", ephemeral=True)
+            return
+
+        # 삭제
+        await db.execute(
+            "DELETE FROM pets WHERE guild_id = ? AND name = ?",
+            (guild_id, name)
+        )
+        await db.commit()
+
+    await send_reply(inter, f"🗑️ `{name}` 펫이 도감에서 삭제되었습니다.", ephemeral=False)
 
 # =========================================================
 # 9. 정산 / 확인 (관리자용 봇채널)
