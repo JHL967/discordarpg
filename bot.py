@@ -1105,8 +1105,13 @@ async def slash_inventory_cmd(inter: discord.Interaction):
     lines = []
     for item in inv:
         line = f"- {item['name']} x {item['quantity']}개"
-        if item["description"]:
-            line += f" ({item['description']})"
+
+        desc = (item["description"] or "").strip()
+
+        # 🔹 '낚시 전용'으로 시작하는 설명은 인벤토리에서 숨기기
+        if desc and not desc.startswith("낚시 전용"):
+            line += f" ({desc})"
+
         lines.append(line)
 
     msg = "\n".join(lines)
@@ -1115,6 +1120,7 @@ async def slash_inventory_cmd(inter: discord.Interaction):
         f"📦 **{inter.user.display_name}** 님의 인벤토리:\n{msg}",
         ephemeral=True,
     )
+
 
 @bot.tree.command(
     name="펫도감",
