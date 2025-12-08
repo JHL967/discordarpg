@@ -909,14 +909,16 @@ async def slash_bonus_attend(inter: discord.Interaction):
     if not await ensure_channel_inter(inter, "attend"):
         return
 
+    # 오늘 날짜
     today_str = get_today_kst_str()
 
     settings = await get_or_create_guild_settings(inter.guild.id)
     attend_currency_id = settings["attend_currency_id"]
 
+    # 유저 정보
     user = await get_or_create_user(inter.guild.id, inter.user.id)
 
-    # 1) 아직 오늘 기본 출석을 안 했으면 불가
+    # 1) 오늘 기본 출석 안 했으면 불가
     if user["last_attend_date"] != today_str:
         await send_reply(
             inter,
@@ -926,9 +928,8 @@ async def slash_bonus_attend(inter: discord.Interaction):
         )
         return
 
-    # 2) 오늘 이미 재출석을 한 적이 있다면 또 못 쓰게
-    #    (Row 객체라 .get() 안 되고, 키로 바로 접근)
-    last_bonus = user["last_bonus_attend_date"]
+    # 2) 오늘 이미 재출석 했으면 불가
+    last_bonus = user["last_bonus_attend_date"]  # Row라서 [] 로 접근
     if last_bonus == today_str:
         await send_reply(
             inter,
@@ -937,14 +938,13 @@ async def slash_bonus_attend(inter: discord.Interaction):
         )
         return
 
-    # --- 이하 나머지 코드는 그대로 사용 (행운 아이템 확인/소모, 보상 지급 등) ---
-
-
-    # 3) 인벤토리에서 '출석 주사위' 또는 '행운의 꼬리' 보유 여부 확인
+    # 3) 인벤토리에서 행운 아이템 찾기
     lucky_items = ["출석 주사위", "행운의 꼬리"]
     chosen_row = None
 
     async with aiosqlite.connect(DB_PATH) as db:
+        # 🔹 Row 객체로 받기 (중요!)
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
             SELECT inv.id AS inv_id, inv.quantity, i.name
@@ -959,7 +959,7 @@ async def slash_bonus_attend(inter: discord.Interaction):
         rows = await cursor.fetchall()
         await cursor.close()
 
-    # rows 안에 두 아이템 중 어떤 것이든 있을 수 있으니 우선순위 정하기
+    # 우선순위: lucky_items[0] -> lucky_items[1]
     for name in lucky_items:
         for row in rows:
             if row["name"] == name:
@@ -994,7 +994,7 @@ async def slash_bonus_attend(inter: discord.Interaction):
             )
         await db.commit()
 
-    # 5) 출석 재화 정보 확인
+    # 5) 출석 재화 정보
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT name, code FROM currencies WHERE id = ?",
@@ -1013,11 +1013,11 @@ async def slash_bonus_attend(inter: discord.Interaction):
 
     cur_name, cur_code = cur_row
 
-    # 6) 1d50 다시 굴려서 추가 보상 지급
+    # 6) 1d50 보너스 지급
     roll = random.randint(1, 50)
     new_amount = await change_balance(user["id"], attend_currency_id, roll)
 
-    # 7) 오늘 재출석 사용 날짜 기록 (기본 출석 날짜는 그대로 둠)
+    # 7) 오늘 보너스 출석 기록
     await update_user_last_bonus_attend(user["id"], today_str)
 
     embed = discord.Embed(
@@ -1027,7 +1027,7 @@ async def slash_bonus_attend(inter: discord.Interaction):
             f"+ {roll} {cur_name} (`{cur_code}`)\n"
             f"현재 소지금: **{new_amount} {cur_name}**"
         ),
-        color=discord.Color.gold(),  # 노란 느낌
+        color=discord.Color.gold(),
     )
 
     await send_reply(
@@ -1035,6 +1035,7 @@ async def slash_bonus_attend(inter: discord.Interaction):
         embed=embed,
         ephemeral=False,
     )
+
 
 
 
