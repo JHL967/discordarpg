@@ -2302,7 +2302,7 @@ async def slash_set_fishing_chance(
             )
             return
 
-        auto_desc = f"낚시 전용 자동 생성 아이템 ({name})"
+        auto_desc = f"{name}"
         item_id = await add_item(
             inter.guild.id,
             name,
