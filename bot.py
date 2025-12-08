@@ -39,6 +39,8 @@ from db import (
     get_fishing_loot,
     get_fishing_daily_count,       # ✅ 추가
     increment_fishing_daily_count, # ✅ 추가
+    add_or_update_pet,   # ✅ 추가
+    list_pets,           # ✅ 추가
 )
 
 # =========================================================
@@ -880,13 +882,22 @@ async def slash_attend(inter: discord.Interaction):
     await update_user_last_attend(user["id"], today_str)
 
     # ✅ 결과 메시지 전송
+    # ✅ 결과 메시지 전송 (Embed 사용)
+    embed = discord.Embed(
+        title="출석체크 완료! 🎉",
+        description=(
+            f"+ {roll} {cur_name} `{cur_code}`\n"
+            f"현재 소지금: **{new_amount} {cur_name}**"
+        ),
+        color=discord.Color.green(),  # 왼쪽 초록색 줄
+    )
+
     await send_reply(
         inter,
-        f"🎲 출석 완료! 1d50 → **{roll}** 이(가) 나왔어요.\n"
-        f"획득 재화: **{cur_name}** (`{cur_code}`)\n"
-        f"현재 소지금: **{new_amount} {cur_name}**",
+        embed=embed,
         ephemeral=False,
     )
+
 
 
 
@@ -1006,14 +1017,22 @@ async def slash_bonus_attend(inter: discord.Interaction):
     # 7) 오늘 재출석 사용 날짜 기록 (기본 출석 날짜는 그대로 둠)
     await update_user_last_bonus_attend(user["id"], today_str)
 
+    embed = discord.Embed(
+        title="보너스 출석 완료! 🍀",
+        description=(
+            f"사용 아이템: **{used_item_name}**\n"
+            f"+ {roll} {cur_name} (`{cur_code}`)\n"
+            f"현재 소지금: **{new_amount} {cur_name}**"
+        ),
+        color=discord.Color.gold(),  # 노란 느낌
+    )
+
     await send_reply(
         inter,
-        f"🍀 **{used_item_name}** 을(를) 사용하여 추가 출석에 성공했습니다!\n"
-        f"🎲 보너스 출석 1d50 → **{roll}**\n"
-        f"획득 재화: **{cur_name}** (`{cur_code}`)\n"
-        f"현재 소지금: **{new_amount} {cur_name}**",
+        embed=embed,
         ephemeral=False,
     )
+
 
 
 # =========================================================
@@ -1093,6 +1112,38 @@ async def slash_inventory_cmd(inter: discord.Interaction):
         ephemeral=True,
     )
 
+@bot.tree.command(
+    name="펫도감",
+    description="등록된 펫들의 이름과 설명을 확인합니다.",
+)
+async def slash_petdex(inter: discord.Interaction):
+    # 사용자용 봇 채널에서만 사용
+    if not await ensure_channel_inter(inter, "user"):
+        return
+
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
+
+    pets = await list_pets(inter.guild.id)
+    if not pets:
+        await send_reply(
+            inter,
+            "아직 등록된 펫이 없습니다.\n관리자에게 `/펫등록` 으로 펫을 등록해 달라고 요청해 보세요!",
+            ephemeral=True,
+        )
+        return
+
+    view = PetDexView(pets)
+    embed = view.make_list_embed()
+
+    try:
+        if inter.response.is_done():
+            await inter.followup.send(embed=embed, view=view, ephemeral=True)
+        else:
+            await inter.response.send_message(embed=embed, view=view, ephemeral=True)
+    except discord.NotFound:
+        print("[WARN] 펫도감 응답 중 인터랙션 만료(404)")
 
 # =========================================================
 # 3-1. 선물 기능 (재화 / 아이템) - 사용자용 봇채널
@@ -2027,6 +2078,106 @@ async def slash_add_admin_item(
         f"- 상점에는 표시되지 않으며, 보상/이벤트/정산 등으로만 지급할 수 있습니다.",
         ephemeral=True,
     )
+@bot.tree.command(
+    name="관리자아이템목록",
+    description="상점에 보이지 않는 관리자/숨김 아이템 목록을 봅니다. (관리자 전용)",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def slash_list_admin_items(inter: discord.Interaction):
+    # 관리자용 봇 채널에서만 사용
+    if not await ensure_channel_inter(inter, "admin"):
+        return
+
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # 🔹 is_shop = 0 인 숨김 아이템 중에서,
+        #     fishing_loot에 등록된 낚시 아이템은 전부 제외
+        cursor = await db.execute(
+            """
+            SELECT i.id,
+                   i.name,
+                   i.description,
+                   i.price,
+                   i.stock,
+                   i.is_shop,
+                   c.name AS currency_name,
+                   c.code AS currency_code
+              FROM items AS i
+              LEFT JOIN currencies AS c
+                ON i.currency_id = c.id
+             WHERE i.guild_id = ?
+               AND i.is_shop = 0
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM fishing_loot AS f
+                    WHERE f.guild_id = i.guild_id
+                      AND f.item_id  = i.id
+               )
+            """,
+            (inter.guild.id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    if not rows:
+        await send_reply(
+            inter,
+            "이 서버에는 상점에 보이지 않는 관리자/숨김 아이템이 없습니다.\n"
+            "(*낚시 전용 아이템은 `/낚시확률목록`에서 확인할 수 있어요.*)",
+            ephemeral=True,
+        )
+        return
+
+    # 🔹 간단 분류: 설명에 '관리자' 들어가면 관리자 전용, 그 외는 기타 숨김 아이템
+    admin_items = []
+    other_items = []
+
+    for row in rows:
+        desc_lower = (row["description"] or "").lower()
+        if "관리자" in desc_lower:
+            admin_items.append(row)
+        else:
+            other_items.append(row)
+
+    embed = discord.Embed(
+        title="🔐 관리자/숨김 아이템 목록",
+        description=(
+            "상점에 보이지 않는 아이템 목록입니다.\n"
+            "※ 낚시 전용 아이템은 이 목록에서 제외되며, `/낚시확률목록`에서 확인할 수 있습니다."
+        ),
+        color=discord.Color.purple(),
+    )
+
+    def fmt_item(r):
+        currency_name = r["currency_name"] or "알 수 없음"
+        currency_code = r["currency_code"] or "?"
+        desc = r["description"] or "설명 없음"
+        return (
+            f"[{r['id']}] {r['name']}\n"
+            f"  └ {desc}\n"
+            f"  └ 기준 재화: {currency_name} (`{currency_code}`)\n"
+        )
+
+    if admin_items:
+        embed.add_field(
+            name="🛡 관리자 전용 아이템",
+            value="\n".join(fmt_item(r) for r in admin_items)[:1024],
+            inline=False,
+        )
+
+    if other_items:
+        embed.add_field(
+            name="📦 기타 숨김 아이템",
+            value="\n".join(fmt_item(r) for r in other_items)[:1024],
+            inline=False,
+        )
+
+    await send_reply(inter, embed=embed, ephemeral=True)
+
 
 # =========================================================
 # 8. 낚시 전용 아이템 추가 + 낚시 확률 + 낚시
@@ -2361,14 +2512,22 @@ async def slash_fishing(inter: discord.Interaction):
 
     if chosen is None or roll >= total:
         # 꽝
+        embed = discord.Embed(
+            title="낚시 결과 : 꽝... 🎣",
+            description=(
+                f"오늘 사용한 낚시 횟수: {new_count}/{MAX_FISH_PER_DAY}"
+            ),
+            color=discord.Color.dark_grey(),
+        )
+
         await send_reply(
             inter,
-            f"🎣 낚시 결과: **꽝!**\n"
-            f"(랜덤 값: {roll:.2f}% / 아이템 확률 합: {total:.2f}% )\n"
-            f"오늘 사용한 낚시 횟수: {new_count}/{MAX_FISH_PER_DAY}",
+            embed=embed,
             ephemeral=False,
         )
         return
+
+
 
     # 8) 당첨 아이템 인벤토리에 +1
     async with aiosqlite.connect(DB_PATH) as db:
@@ -2392,14 +2551,22 @@ async def slash_fishing(inter: discord.Interaction):
             )
         await db.commit()
 
+    embed = discord.Embed(
+        title="낚시 결과! 🎣",
+        description=(
+            f"획득 아이템: **{chosen['item_name']}**\n"
+            f"오늘 사용한 낚시 횟수: {new_count}/{MAX_FISH_PER_DAY}\n"
+            f"획득한 아이템은 인벤토리에 저장되었습니다. `/인벤토리` 로 확인해보세요."
+        ),
+        color=discord.Color.blue(),
+    )
+
     await send_reply(
         inter,
-        f"🎣 낚시 결과: **{chosen['item_name']}** 을(를) 획득했습니다!\n"
-        f"(랜덤 값: {roll:.2f} / 아이템 확률: {chosen['chance']:.2f}%)\n"
-        f"오늘 사용한 낚시 횟수: {new_count}/{MAX_FISH_PER_DAY}\n"
-        f"획득한 아이템은 인벤토리에 저장되었습니다. `/인벤토리` 로 확인해보세요.",
+        embed=embed,
         ephemeral=False,
     )
+
 @bot.tree.command(
     name="인벤초기화",
     description="특정 유저의 인벤토리를 전부 비웁니다. (관리자)",
@@ -2436,6 +2603,51 @@ async def slash_clear_inventory(
         f"🧹 **{member.display_name}** 님의 인벤토리를 전부 초기화했습니다.",
         ephemeral=False,
     )
+# =========================================================
+# 10. 펫등록
+# =========================================================
+@bot.tree.command(
+    name="펫등록",
+    description="펫 도감에 펫을 등록하거나 설명을 수정합니다. (관리자)",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    name="펫 이름",
+    description="펫 설명 (자세할수록 좋아요!)",
+)
+async def slash_register_pet(
+    inter: discord.Interaction,
+    name: str,
+    description: str,
+):
+    # 관리자용 봇 채널에서만 사용
+    if not await ensure_channel_inter(inter, "admin"):
+        return
+
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
+
+    name = name.strip()
+    if not name:
+        await send_reply(inter, "펫 이름을 입력해 주세요.", ephemeral=True)
+        return
+
+    desc = description.strip()
+    if not desc:
+        await send_reply(inter, "펫 설명을 한 줄 이상 적어 주세요.", ephemeral=True)
+        return
+
+    await add_or_update_pet(inter.guild.id, name, desc)
+
+    await send_reply(
+        inter,
+        f"✅ 펫 도감 등록/수정 완료!\n"
+        f"- 이름: **{name}**\n"
+        f"- 설명: {desc}",
+        ephemeral=True,
+    )
+
 
 # =========================================================
 # 9. 정산 / 확인 (관리자용 봇채널)
@@ -2478,6 +2690,78 @@ async def slash_settle(
         f"- 재화: {cur['name']} (`{cur['code']}`)\n"
         f"- 변화량: {amount}\n"
         f"- 정산 후 소지금: {new_balance} {cur['name']}",
+        ephemeral=False,
+    )
+@bot.tree.command(
+    name="전체정산",
+    description="이 서버의 모든 유저에게 재화를 일괄 지급/차감합니다. (관리자)",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    amount="지급(+) 또는 차감(-)할 양 (0은 불가)",
+    currency_identifier="재화 코드 또는 이름 (예: coin, 여우코인)",
+)
+async def slash_settle_all(
+    inter: discord.Interaction,
+    amount: int,
+    currency_identifier: str,
+):
+    # 🔒 관리자용 봇채널에서만 사용 (원하면 제거해도 됨)
+    if not await ensure_channel_inter(inter, "admin"):
+        return
+
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
+
+    if amount == 0:
+        await send_reply(inter, "0은 정산할 수 없어요. 양수 또는 음수 금액을 입력해주세요.", ephemeral=True)
+        return
+
+    # 어떤 재화를 쓸지 찾기
+    cur = await get_currency_by_identifier(inter.guild.id, currency_identifier)
+    if not cur:
+        await send_reply(
+            inter,
+            f"`{currency_identifier}` 에 해당하는 재화를 찾을 수 없습니다. `/재화`로 확인해보세요.",
+            ephemeral=True,
+        )
+        return
+
+    # 이 길드에 등록된 모든 유저 (users 테이블 기준)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, user_id FROM users WHERE guild_id = ?",
+            (inter.guild.id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    if not rows:
+        await send_reply(
+            inter,
+            "아직 이 서버에 등록된 유저가 없습니다. (출석/명령어 사용 이력이 없는 상태일 수 있어요.)",
+            ephemeral=True,
+        )
+        return
+
+    # 한 명씩 change_balance 호출해서 지급/차감
+    affected = 0
+    for row in rows:
+        db_user_id = row["id"]
+        await change_balance(db_user_id, cur["id"], amount)
+        affected += 1
+
+    sign = "지급" if amount > 0 else "차감"
+    total = amount * affected
+
+    await send_reply(
+        inter,
+        f"✅ 전체 정산 완료 ({sign})\n"
+        f"- 대상 유저 수: {affected}명\n"
+        f"- 1인당 변화량: {amount} {cur['name']} (`{cur['code']}`)\n"
+        f"- 총 변화량(합계): {total} {cur['name']}",
         ephemeral=False,
     )
 
@@ -2626,6 +2910,118 @@ async def slash_check_user(inter: discord.Interaction, member: discord.Member):
         ephemeral=True,
     )
 
+# =========================================================
+# 펫 도감용 View / Select / 페이지 버튼
+# =========================================================
+
+class PetDexView(discord.ui.View):
+    def __init__(self, pets, *, timeout: float = 120):
+        super().__init__(timeout=timeout)
+        self.pets = pets                # 리스트[dict]
+        self.page = 0
+        self.page_size = 6
+        self.total_pages = max(1, (len(pets) + self.page_size - 1) // self.page_size)
+
+        # 셀렉트 메뉴 (최대 25개까지만 등록 – 디스코드 제한)
+        options = [
+            discord.SelectOption(
+                label=p["name"],
+                description=(p["description"] or "설명 없음")[:90],
+                value=str(idx),
+            )
+            for idx, p in enumerate(self.pets[:25])
+        ]
+        if options:
+            self.add_item(PetSelect(self, options))
+
+        # 이전/다음 버튼
+        if self.total_pages > 1:
+            self.add_item(PetPrevButton())
+            self.add_item(PetNextButton())
+
+    def current_page_pets(self):
+        start = self.page * self.page_size
+        end = start + self.page_size
+        return self.pets[start:end]
+
+    def make_list_embed(self):
+        chunk = self.current_page_pets()
+        if not chunk:
+            desc = "등록된 펫이 없습니다."
+        else:
+            lines = []
+            for p in chunk:
+                desc = (p["description"] or "설명 없음").replace("\n", " ")
+                if len(desc) > 80:
+                    desc = desc[:80] + "..."
+                lines.append(f"**{p['name']}**\n{desc}")
+            desc = "\n\n".join(lines)
+
+        embed = discord.Embed(
+            title=f"🐾 펫 도감 ({self.page+1}/{self.total_pages})",
+            description=desc,
+            color=discord.Color.teal(),
+        )
+        embed.set_footer(text="아래 선택 메뉴에서 특정 펫을 선택하면 상세 정보를 볼 수 있어요.")
+        return embed
+
+    def make_detail_embed(self, pet: dict):
+        embed = discord.Embed(
+            title=f"🐾 펫 정보 - {pet['name']}",
+            description=pet["description"] or "설명 없음",
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="다른 펫을 보려면 선택 메뉴나 페이지 버튼을 다시 사용해 주세요.")
+        return embed
+
+
+class PetSelect(discord.ui.Select):
+    def __init__(self, view: PetDexView, options):
+        super().__init__(
+            placeholder="자세히 볼 펫을 선택하세요.",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.pet_view = view
+
+    async def callback(self, inter: discord.Interaction):
+        idx = int(self.values[0])
+        if idx < 0 or idx >= len(self.pet_view.pets):
+            await inter.response.send_message("잘못된 선택입니다.", ephemeral=True)
+            return
+
+        pet = self.pet_view.pets[idx]
+        embed = self.pet_view.make_detail_embed(pet)
+        await inter.response.edit_message(embed=embed, view=self.pet_view)
+
+
+class PetPrevButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.secondary, label="이전")
+
+    async def callback(self, inter: discord.Interaction):
+        view: PetDexView = self.view  # type: ignore
+        if view.total_pages <= 1:
+            await inter.response.defer()
+            return
+        view.page = (view.page - 1) % view.total_pages
+        embed = view.make_list_embed()
+        await inter.response.edit_message(embed=embed, view=view)
+
+
+class PetNextButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.secondary, label="다음")
+
+    async def callback(self, inter: discord.Interaction):
+        view: PetDexView = self.view  # type: ignore
+        if view.total_pages <= 1:
+            await inter.response.defer()
+            return
+        view.page = (view.page + 1) % view.total_pages
+        embed = view.make_list_embed()
+        await inter.response.edit_message(embed=embed, view=view)
 
 # =========================================================
 # 10. /설명 : 채널별로 다른 명령어 설명
@@ -2667,6 +3063,7 @@ async def slash_help(inter: discord.Interaction):
         ("`/재화`", "서버 재화 목록 보기"),
         ("`/소지금`", "자신의 소지금 확인"),
         ("`/인벤토리`", "자신의 인벤토리 확인"),
+        ("`/펫도감`", "등록된 펫 목록과 설명 보기"),
     ]
 
     # 거래 채널(선물 전용)
@@ -2715,8 +3112,12 @@ async def slash_help(inter: discord.Interaction):
         ("`/낚시아이템추가`", "낚시 전용 아이템 추가"),
         ("`/낚시확률`", "낚시 아이템 확률 설정"),
         ("`/낚시확률목록`", "낚시 확률 목록 보기"),
+        ("`/펫등록`", "펫 도감에 펫 등록/설명 수정"),
         ("`/정산`", "특정 사용자 재화 증감"),
+        ("`/전체정산`", "서버 전체 유저 재화 일괄 지급/차감"),
         ("`/확인`", "특정 사용자 소지금 + 인벤토리 확인"),
+        ("`/관리자아이템추가`", "상점에 보이지 않는 관리자 전용 아이템 추가"),
+        ("`/관리자아이템목록`", "관리자 아이템 목록 확인"),
     ]
 
     in_attend = (attend_channel is not None and channel_id == attend_channel)

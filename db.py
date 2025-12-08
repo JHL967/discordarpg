@@ -161,7 +161,7 @@ async def init_db():
             ON sell_shop_items (guild_id, item_id)
             """
         )
-                # -------------------------------------------------
+        # -------------------------------------------------
         # 낚시 일일 제한 테이블 (유저당 KST 기준 하루 3회)
         # -------------------------------------------------
         await db.execute(
@@ -203,6 +203,20 @@ async def init_db():
             """
         )
 
+        # -------------------------------------------------
+        # 펫 도감 테이블
+        # -------------------------------------------------
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pets (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    INTEGER NOT NULL,
+                name        TEXT NOT NULL,
+                description TEXT,
+                UNIQUE(guild_id, name)
+            )
+            """
+        )
         await db.commit()
 
 
@@ -809,6 +823,44 @@ async def get_fishing_loot(guild_id: int):
             JOIN items i ON f.item_id = i.id
             WHERE f.guild_id = ?
             ORDER BY i.id ASC
+            """,
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [dict(r) for r in rows]
+# ---------------------------------------------------------
+# pets (펫 도감)
+# ---------------------------------------------------------
+
+async def add_or_update_pet(guild_id: int, name: str, description: str):
+    """
+    같은 (guild_id, name) 이 이미 있으면 설명만 수정,
+    없으면 새로 추가.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO pets (guild_id, name, description)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, name)
+            DO UPDATE SET description = excluded.description
+            """,
+            (guild_id, name, description),
+        )
+        await db.commit()
+
+
+async def list_pets(guild_id: int):
+    """길드의 펫 전체 목록을 리스트[dict] 로 반환."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id, name, description
+            FROM pets
+            WHERE guild_id = ?
+            ORDER BY id ASC
             """,
             (guild_id,),
         )
