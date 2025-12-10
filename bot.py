@@ -1088,7 +1088,9 @@ async def slash_balance(inter: discord.Interaction, identifier: str | None = Non
 
 @bot.tree.command(name="인벤토리", description="자신의 인벤토리를 확인합니다.")
 async def slash_inventory_cmd(inter: discord.Interaction):
-    if not await ensure_channel_inter(inter, "user"):
+    # 서버(길드) 안에서만 사용 가능하게만 체크
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
         return
 
     user = await get_or_create_user(inter.guild.id, inter.user.id)
@@ -1120,6 +1122,7 @@ async def slash_inventory_cmd(inter: discord.Interaction):
         f"📦 **{inter.user.display_name}** 님의 인벤토리:\n{msg}",
         ephemeral=True,
     )
+
 
 
 @bot.tree.command(
