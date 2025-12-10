@@ -1433,6 +1433,91 @@ async def slash_event_shop(inter: discord.Interaction):
 
     await send_reply(inter, embed=embed, ephemeral=True)
 
+@bot.tree.command(
+    name="아이템관리",
+    description="상점에 등록된 아이템을 선택해서 수정/삭제합니다. (관리자)",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def slash_manage_items(inter: discord.Interaction):
+    # 서버 안에서만
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
+
+    guild_id = inter.guild.id
+
+    # 이 명령어는 '상점 채널' 또는 '관리자용 봇채널'에서만 사용 가능
+    settings = await get_or_create_guild_settings(guild_id)
+    shop_channel_id = settings["shop_channel_id"]
+    admin_channel_id = await get_admin_channel_id(guild_id)
+
+    if shop_channel_id is None and admin_channel_id is None:
+        await send_reply(
+            inter,
+            "아직 상점 채널이나 관리자용 봇채널이 설정되지 않았어요.\n"
+            "`/상점채널설정`, `/명령어채널설정` 으로 먼저 채널을 설정해 주세요.",
+            ephemeral=True,
+        )
+        return
+
+    if (shop_channel_id is not None and str(inter.channel.id) == str(shop_channel_id)) or \
+       (admin_channel_id is not None and str(inter.channel.id) == str(admin_channel_id)):
+        pass
+    else:
+        await send_reply(
+            inter,
+            "이 명령어는 **상점 채널** 또는 **관리자용 봇채널**에서만 사용할 수 있어요!",
+            ephemeral=True,
+        )
+        return
+
+    # 상점에 노출 중인(is_shop = 1) 아이템 가져오기
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT i.id,
+                   i.name,
+                   i.price,
+                   i.stock,
+                   i.description,
+                   c.name AS currency_name,
+                   c.code AS currency_code
+              FROM items AS i
+              LEFT JOIN currencies AS c
+                ON i.currency_id = c.id
+             WHERE i.guild_id = ?
+               AND i.is_shop = 1
+             ORDER BY i.name
+            """,
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    if not rows:
+        await send_reply(
+            inter,
+            "현재 상점에 등록된 아이템이 없습니다.\n"
+            "`/아이템추가`, `/이벤트아이템추가` 로 먼저 아이템을 등록해 주세요.",
+            ephemeral=True,
+        )
+        return
+
+    items = [dict(r) for r in rows]
+
+    view = ItemManageView(items, manager_id=inter.user.id)
+    embed = view.make_list_embed()
+
+    try:
+        if inter.response.is_done():
+            message = await inter.followup.send(embed=embed, view=view, ephemeral=True)
+        else:
+            message = await inter.response.send_message(embed=embed, view=view, ephemeral=True)
+        view.message = message
+    except discord.NotFound:
+        print("[WARN] 아이템관리 응답 중 인터랙션 만료(404)")
+
 
 # =========================================================
 # 5. 아이템 추가/삭제 (재고 포함, 상점용)
@@ -2996,6 +3081,326 @@ async def slash_check_user(inter: discord.Interaction, member: discord.Member):
         f"🎒 인벤토리:\n{inv_text}",
         ephemeral=True,
     )
+# =========================================================
+# 아이템 관리용 View / Select / Modal
+# =========================================================
+
+class ItemManageView(discord.ui.View):
+    def __init__(self, items, manager_id: int, *, timeout: float = 180):
+        super().__init__(timeout=timeout)
+        self.items = items          # [{id, name, price, stock, description, currency_name, currency_code}, ...]
+        self.manager_id = manager_id
+        self.page = 0
+        self.page_size = 10
+        self.total_pages = max(1, (len(items) + self.page_size - 1) // self.page_size)
+        self.message: discord.Message | None = None  # 리스트 메시지 저장
+
+        # 드롭다운용 옵션 (디스코드 제한: 최대 25개)
+        options = []
+        for idx, item in enumerate(self.items[:25]):
+            label = item["name"]
+            cur_name = item.get("currency_name") or "알 수 없음"
+            price = item.get("price", 0)
+            desc = f"{price} {cur_name}"
+            options.append(
+                discord.SelectOption(
+                    label=str(label)[:100],
+                    description=str(desc)[:100],
+                    value=str(idx),  # 전체 리스트 기준 인덱스
+                )
+            )
+
+        if options:
+            self.add_item(ItemSelect(self, options))
+
+        # 페이지 버튼
+        if self.total_pages > 1:
+            self.add_item(ItemPrevButton())
+            self.add_item(ItemNextButton())
+
+    def current_page_items(self):
+        start = self.page * self.page_size
+        end = start + self.page_size
+        return self.items[start:end]
+
+    def make_list_embed(self):
+        chunk = self.current_page_items()
+        lines = []
+        for item in chunk:
+            stock = item.get("stock")
+            if stock is None:
+                stock_text = "제한없음"
+            elif stock <= 0:
+                stock_text = "품절"
+            else:
+                stock_text = f"{stock}개"
+
+            cur_name = item.get("currency_name") or "알 수 없음"
+            cur_code = item.get("currency_code") or "?"
+            desc = (item.get("description") or "설명 없음").replace("\n", " ")
+
+            lines.append(
+                f"**[{item['id']}] {item['name']}**\n"
+                f"  └ 가격: {item['price']} {cur_name} (`{cur_code}`)\n"
+                f"  └ 재고: {stock_text}\n"
+                f"  └ 설명: {desc[:80]}{'...' if len(desc) > 80 else ''}"
+            )
+
+        body = "\n\n".join(lines) if lines else "이 페이지에는 아이템이 없습니다."
+
+        embed = discord.Embed(
+            title=f"🛠 아이템 관리 ({self.page+1}/{self.total_pages})",
+            description=(
+                "드롭다운에서 수정/삭제할 아이템을 선택하면, 수정/삭제용 창(모달)이 열립니다.\n\n"
+                + body
+            ),
+            color=discord.Color.blue(),
+        )
+        return embed
+
+
+class ItemSelect(discord.ui.Select):
+    def __init__(self, view: ItemManageView, options):
+        super().__init__(
+            placeholder="수정/삭제할 아이템을 선택하세요.",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.manage_view = view
+
+    async def callback(self, inter: discord.Interaction):
+        # 이 View를 연 관리자 또는 manage_guild 권한이 있는 사람만 허용
+        if inter.user.id != self.manage_view.manager_id and not inter.user.guild_permissions.manage_guild:
+            await inter.response.send_message(
+                "이 아이템 관리 메뉴는 명령을 실행한 관리자만 사용할 수 있습니다.",
+                ephemeral=True,
+            )
+            return
+
+        idx = int(self.values[0])
+        if idx < 0 or idx >= len(self.manage_view.items):
+            await inter.response.send_message("잘못된 선택입니다.", ephemeral=True)
+            return
+
+        item = self.manage_view.items[idx]
+
+        # 모달 열기
+        modal = ItemEditModal(item, parent_view=self.manage_view)
+        await inter.response.send_modal(modal)
+
+
+class ItemEditModal(discord.ui.Modal, title="아이템 수정 / 삭제"):
+    def __init__(self, item: dict, parent_view: ItemManageView):
+        super().__init__(timeout=180)
+        self.item = item
+        self.parent_view = parent_view
+
+        stock_value = self.item.get("stock")
+        if stock_value is None:
+            stock_str = "-1"  # 무제한
+        else:
+            stock_str = str(stock_value)
+
+        # 이름까지 수정 가능
+        self.name_input = discord.ui.TextInput(
+            label="아이템 이름",
+            default=self.item["name"],
+            required=True,
+            max_length=50,
+        )
+        self.price_input = discord.ui.TextInput(
+            label="가격 (정수)",
+            default=str(self.item["price"]),
+            required=True,
+            max_length=10,
+        )
+        self.stock_input = discord.ui.TextInput(
+            label="재고 (정수, -1 = 무제한)",
+            default=stock_str,
+            required=True,
+            max_length=10,
+        )
+        self.desc_input = discord.ui.TextInput(
+            label="설명",
+            style=discord.TextStyle.paragraph,
+            default=self.item.get("description") or "",
+            required=False,
+            max_length=400,
+        )
+        # 여기 '삭제' 입력하면 상점에서 삭제(숨김)
+        self.delete_input = discord.ui.TextInput(
+            label="이 아이템을 상점에서 삭제하려면 여기 입력란에 '삭제' 라고 적어주세요.",
+            required=False,
+            max_length=10,
+            placeholder="수정만 할 거면 비워두세요.",
+        )
+
+        self.add_item(self.name_input)
+        self.add_item(self.price_input)
+        self.add_item(self.stock_input)
+        self.add_item(self.desc_input)
+        self.add_item(self.delete_input)
+
+    async def on_submit(self, inter: discord.Interaction):
+        # 1) 삭제인지 먼저 확인
+        delete_flag = str(self.delete_input.value).strip()
+
+        if delete_flag == "삭제":
+            # soft delete: 상점에서만 제거 (is_shop = 0) + 판매 상점에서도 제거
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "DELETE FROM sell_shop_items WHERE guild_id = ? AND item_id = ?",
+                    (inter.guild.id, self.item["id"]),
+                )
+                await db.execute(
+                    "UPDATE items SET is_shop = 0 WHERE id = ?",
+                    (self.item["id"],),
+                )
+                await db.commit()
+
+            # 뷰 목록에서도 제거
+            self.parent_view.items = [
+                it for it in self.parent_view.items if it["id"] != self.item["id"]
+            ]
+            self.parent_view.total_pages = max(
+                1,
+                (len(self.parent_view.items) + self.parent_view.page_size - 1)
+                // self.parent_view.page_size,
+            )
+            if self.parent_view.page >= self.parent_view.total_pages:
+                self.parent_view.page = self.parent_view.total_pages - 1
+
+            # 리스트 메시지 갱신
+            if self.parent_view.message:
+                try:
+                    await self.parent_view.message.edit(
+                        embed=self.parent_view.make_list_embed(),
+                        view=self.parent_view,
+                    )
+                except discord.NotFound:
+                    pass
+
+            embed = discord.Embed(
+                title="🗑 아이템 삭제 완료",
+                description=(
+                    f"상점 목록에서 **[{self.item['id']}] {self.item['name']}** 아이템을 제거했습니다.\n"
+                    f"이미 플레이어 인벤토리에 있는 아이템은 그대로 남습니다."
+                ),
+                color=discord.Color.red(),
+            )
+            await inter.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # 2) 여기부터는 '수정' 로직
+        new_name = str(self.name_input.value).strip()
+        if not new_name:
+            await inter.response.send_message("아이템 이름을 비워둘 수는 없습니다.", ephemeral=True)
+            return
+
+        try:
+            new_price = int(str(self.price_input.value).strip())
+        except ValueError:
+            await inter.response.send_message("가격은 정수로 입력해 주세요.", ephemeral=True)
+            return
+
+        try:
+            new_stock_raw = int(str(self.stock_input.value).strip())
+        except ValueError:
+            await inter.response.send_message("재고는 정수로 입력해 주세요. (-1 = 무제한)", ephemeral=True)
+            return
+
+        if new_price < 0:
+            await inter.response.send_message("가격은 0 이상이어야 합니다.", ephemeral=True)
+            return
+
+        if new_stock_raw == -1:
+            new_stock = None  # 무제한
+        elif new_stock_raw >= 0:
+            new_stock = new_stock_raw
+        else:
+            await inter.response.send_message(
+                "재고는 0 이상이거나 -1(무제한)만 가능합니다.", ephemeral=True
+            )
+            return
+
+        new_desc = str(self.desc_input.value).strip()
+
+        # DB 업데이트 (이름까지)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                UPDATE items
+                   SET name = ?,
+                       price = ?,
+                       stock = ?,
+                       description = ?
+                 WHERE id = ?
+                """,
+                (new_name, new_price, new_stock, new_desc, self.item["id"]),
+            )
+            await db.commit()
+
+        # 메모리 값도 갱신
+        self.item["name"] = new_name
+        self.item["price"] = new_price
+        self.item["stock"] = new_stock
+        self.item["description"] = new_desc
+
+        stock_text = "제한없음" if new_stock is None else f"{new_stock}개"
+
+        embed = discord.Embed(
+            title="✅ 아이템 수정 완료",
+            description=(
+                f"**[{self.item['id']}] {new_name}** 이(가) 수정되었습니다.\n\n"
+                f"- 가격: {new_price}\n"
+                f"- 재고: {stock_text}\n"
+                f"- 설명: {new_desc or '설명 없음'}"
+            ),
+            color=discord.Color.blue(),
+        )
+
+        await inter.response.send_message(embed=embed, ephemeral=True)
+
+        # 리스트 메시지 갱신
+        if self.parent_view.message:
+            try:
+                await self.parent_view.message.edit(
+                    embed=self.parent_view.make_list_embed(),
+                    view=self.parent_view,
+                )
+            except discord.NotFound:
+                pass
+
+
+class ItemPrevButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.secondary, label="이전")
+
+    async def callback(self, inter: discord.Interaction):
+        view: ItemManageView = self.view  # type: ignore
+        if view.total_pages <= 1:
+            await inter.response.defer()
+            return
+
+        view.page = (view.page - 1) % view.total_pages
+        embed = view.make_list_embed()
+        await inter.response.edit_message(embed=embed, view=view)
+
+
+class ItemNextButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.secondary, label="다음")
+
+    async def callback(self, inter: discord.Interaction):
+        view: ItemManageView = self.view  # type: ignore
+        if view.total_pages <= 1:
+            await inter.response.defer()
+            return
+
+        view.page = (view.page + 1) % view.total_pages
+        embed = view.make_list_embed()
+        await inter.response.edit_message(embed=embed, view=view)
 
 # =========================================================
 # 펫 도감용 View / Select / 페이지 버튼
@@ -3193,6 +3598,7 @@ async def slash_help(inter: discord.Interaction):
         ("`/출석재화설정`", "출석 보상 재화 변경"),
         ("`/메인재화설정`", "메인 재화 이름 변경"),
         ("`/아이템추가`", "일반 상점 아이템 추가"),
+        ("`/아이템관리`", "상점 아이템을 선택해서 이름/가격/재고/설명을 수정하거나 삭제"),
         ("`/이벤트아이템추가`", "이벤트 상점 아이템 추가"),
         ("`/아이템삭제`", "아이템 삭제"),
         ("`/판매등록`", "판매 상점 아이템 등록/수정"),
