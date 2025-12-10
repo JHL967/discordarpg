@@ -2112,7 +2112,7 @@ async def slash_sell(
         f"- 아이템: {sell_item['item_name']} x {quantity}개\n"
         f"- 얻은 재화: {total_price} {sell_item['currency_name']} (`{sell_item['currency_code']}`)\n"
         f"- 판매 후 소지금: {new_balance} {sell_item['currency_name']}",
-        ephemeral=False,
+        ephemeral=True,
     )
 @bot.tree.command(
     name="판매제거",
