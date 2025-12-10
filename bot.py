@@ -1733,12 +1733,12 @@ async def slash_purge_item_cmd(inter: discord.Interaction, item_name: str):
 # 6. 아이템 구매: /구매 (재고 차감)
 # =========================================================
 
-@bot.tree.command(name="구매", description="아이템 이름과 수량으로 상점 아이템을 구매합니다.")
+@bot.tree.command(name="구매", description="상점에서 아이템을 구매합니다.")
 @app_commands.describe(
     item_name="구매할 아이템 이름",
-    quantity="구매할 개수 (기본값 1)"
+    quantity="구매할 개수 (반드시 입력해야 합니다)"
 )
-async def slash_buy_item(inter: discord.Interaction, item_name: str, quantity: int = 1):
+async def slash_buy_item(inter: discord.Interaction, item_name: str, quantity: int):
     if not await ensure_channel_inter(inter, "shop"):
         return
 
@@ -1754,18 +1754,18 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str, quantity: i
 
     item = await get_item_by_name(inter.guild.id, name)
 
-    # 상점에 노출되는 아이템만 구매 가능 (is_shop=1 인 것만 get_items에 나와 있으므로)
     if not item or item.get("is_shop") == 0:
         await send_reply(
             inter,
-            f"`{name}` 이름의 아이템을 상점에서 찾을 수 없어요.\n"
-            "철자와 띄어쓰기를 정확히 입력했는지 확인하고, `/상점` 또는 `/이벤트상점`으로 아이템 이름을 다시 확인해 주세요.",
+            f"`{name}` 아이템을 상점에서 찾을 수 없습니다.\n"
+            "철자와 띄어쓰기를 확인하고 `/상점` 에서 정확한 이름을 확인해 주세요.",
             ephemeral=True,
         )
         return
 
     stock = item.get("stock")
-    # 재고가 제한되어 있는 경우: 요청한 수량만큼 있는지 확인
+
+    # 재고 체크
     if stock is not None and stock < quantity:
         await send_reply(
             inter,
@@ -1789,9 +1789,9 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str, quantity: i
     if current_balance < total_price:
         await send_reply(
             inter,
-            f"재화가 부족해요!\n"
-            f"- 필요: {total_price} {cur_name} (`{cur_code}`)\n"
-            f"- 보유: {current_balance} {cur_name}",
+            f"재화가 부족합니다!\n"
+            f"- 필요 금액: {total_price} {cur_name}\n"
+            f"- 현재 소지금: {current_balance} {cur_name}",
             ephemeral=True,
         )
         return
@@ -1799,7 +1799,7 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str, quantity: i
     # 재화 차감
     new_balance = await change_balance(user["id"], currency_id, -total_price)
 
-    # 인벤토리에 아이템 수량만큼 추가
+    # 인벤토리 업데이트
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT id, quantity FROM inventories WHERE user_id = ? AND item_id = ?",
@@ -1820,7 +1820,7 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str, quantity: i
                 (user["id"], item["id"], quantity),
             )
 
-        # 재고 차감 (무제한이 아니라면)
+        # 재고 감소
         if stock is not None:
             await db.execute(
                 "UPDATE items SET stock = stock - ? WHERE id = ? AND stock IS NOT NULL",
@@ -1829,21 +1829,21 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str, quantity: i
 
         await db.commit()
 
-    # 새 재고 값 계산
+    # 남은 재고 표시
     if stock is None:
         new_stock_text = "무제한"
     else:
-        new_stock_value = max(stock - quantity, 0)
-        new_stock_text = f"{new_stock_value}개"
+        new_stock_text = f"{max(stock - quantity, 0)}개"
 
     await send_reply(
         inter,
-        f"✅ **{item['name']}** 을(를) **{quantity}개** 구매했습니다!\n"
-        f"- 지불: {total_price} {cur_name} (`{cur_code}`)\n"
+        f"✅ **{item['name']}** {quantity}개 구매 완료!\n"
+        f"- 지불한 금액: {total_price} {cur_name}\n"
         f"- 남은 소지금: {new_balance} {cur_name}\n"
         f"- 남은 재고: {new_stock_text}",
         ephemeral=False,
     )
+
 
 
 
