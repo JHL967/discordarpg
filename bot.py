@@ -1166,7 +1166,7 @@ async def slash_petdex(inter: discord.Interaction):
 @app_commands.describe(
     member="선물을 받을 사용자",
     amount="보낼 재화의 양 (양수만 가능)",
-    currency_identifier="재화 코드 또는 이름 (예: coin, hcoin, 여우코인)",
+    currency_identifier="재화 코드 또는 이름 (예: 여우코인)",
 )
 async def slash_gift_currency(
     inter: discord.Interaction,
@@ -1211,16 +1211,25 @@ async def slash_gift_currency(
     await change_balance(giver["id"], cur["id"], -amount)
     new_receiver_balance = await change_balance(receiver["id"], cur["id"], amount)
 
+    # 🔹 파란색 계열 임베드로 변경
+    embed = discord.Embed(
+        title="🎁 재화 선물 완료!",
+        description=(
+            f"{inter.user.mention} 님이 {member.mention} 님에게 재화를 선물했습니다.\n\n"
+            f"💰 재화: **{cur['name']}** (`{cur['code']}`)\n"
+            f"📤 선물한 양: **{amount}**\n"
+            f"📥 받는 사람 선물 후 소지금: **{new_receiver_balance} {cur['name']}**"
+        ),
+        color=discord.Color.gold(), 
+    )
+    embed.set_footer(text="소중한 선물, 고마운 마음도 함께 전달되었어요!")
+
     await send_reply(
         inter,
-        f"🎁 재화 선물 완료!\n"
-        f"- 보낸 사람: {inter.user.mention}\n"
-        f"- 받은 사람: {member.mention}\n"
-        f"- 재화: {cur['name']} (`{cur['code']}`)\n"
-        f"- 선물한 양: {amount}\n"
-        f"- 받는 사람의 선물 후 소지금: {new_receiver_balance} {cur['name']}",
+        embed=embed,
         ephemeral=False,
     )
+
 
 
 @bot.tree.command(name="아이템선물", description="자신의 인벤토리 아이템을 다른 사용자에게 선물합니다.")
@@ -1321,13 +1330,21 @@ async def slash_gift_item(
 
         await db.commit()
 
+    # 🔹 파란색 계열 임베드로 변경
+    embed = discord.Embed(
+        title="🎁 아이템 선물 완료!",
+        description=(
+            f"{inter.user.mention} 님이 {member.mention} 님에게 아이템을 선물했습니다.\n\n"
+            f"🎒 아이템: **{item['name']}**\n"
+            f"📦 선물한 개수: **{quantity}개**"
+        ),
+        color=discord.Color.blue(),  # 파란색 계열
+    )
+    embed.set_footer(text="선물한 아이템은 상대방 인벤토리에 추가되었습니다.")
+
     await send_reply(
         inter,
-        f"🎁 아이템 선물 완료!\n"
-        f"- 보낸 사람: {inter.user.mention}\n"
-        f"- 받은 사람: {member.mention}\n"
-        f"- 아이템: {item['name']}\n"
-        f"- 선물한 개수: {quantity}개",
+        embed=embed,
         ephemeral=False,
     )
 
