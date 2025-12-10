@@ -1733,12 +1733,25 @@ async def slash_purge_item_cmd(inter: discord.Interaction, item_name: str):
 # 6. 아이템 구매: /구매 (재고 차감)
 # =========================================================
 
-@bot.tree.command(name="구매", description="아이템 이름으로 상점 아이템을 구매합니다.")
-async def slash_buy_item(inter: discord.Interaction, item_name: str):
+@bot.tree.command(name="구매", description="아이템 이름과 수량으로 상점 아이템을 구매합니다.")
+@app_commands.describe(
+    item_name="구매할 아이템 이름",
+    quantity="구매할 개수 (기본값 1)"
+)
+async def slash_buy_item(inter: discord.Interaction, item_name: str, quantity: int = 1):
     if not await ensure_channel_inter(inter, "shop"):
         return
 
     name = item_name.strip()
+
+    if quantity <= 0:
+        await send_reply(
+            inter,
+            "구매할 개수는 1 이상이어야 합니다.",
+            ephemeral=True,
+        )
+        return
+
     item = await get_item_by_name(inter.guild.id, name)
 
     # 상점에 노출되는 아이템만 구매 가능 (is_shop=1 인 것만 get_items에 나와 있으므로)
@@ -1752,10 +1765,13 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str):
         return
 
     stock = item.get("stock")
-    if stock is not None and stock <= 0:
+    # 재고가 제한되어 있는 경우: 요청한 수량만큼 있는지 확인
+    if stock is not None and stock < quantity:
         await send_reply(
             inter,
-            f"❌ **{item['name']}** 은(는) 현재 **품절** 상태입니다.",
+            f"❌ **{item['name']}** 의 재고가 부족합니다.\n"
+            f"- 현재 재고: {stock}개\n"
+            f"- 요청 수량: {quantity}개",
             ephemeral=True,
         )
         return
@@ -1767,19 +1783,23 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str):
     cur_name = item["currency_name"] or "알 수 없음"
     cur_code = item["currency_code"] or "?"
 
+    total_price = price * quantity
+
     current_balance = await get_balance(user["id"], currency_id)
-    if current_balance < price:
+    if current_balance < total_price:
         await send_reply(
             inter,
             f"재화가 부족해요!\n"
-            f"- 필요: {price} {cur_name} (`{cur_code}`)\n"
+            f"- 필요: {total_price} {cur_name} (`{cur_code}`)\n"
             f"- 보유: {current_balance} {cur_name}",
             ephemeral=True,
         )
         return
 
-    new_balance = await change_balance(user["id"], currency_id, -price)
+    # 재화 차감
+    new_balance = await change_balance(user["id"], currency_id, -total_price)
 
+    # 인벤토리에 아이템 수량만큼 추가
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT id, quantity FROM inventories WHERE user_id = ? AND item_id = ?",
@@ -1792,33 +1812,39 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str):
             inv_id, qty = row
             await db.execute(
                 "UPDATE inventories SET quantity = ? WHERE id = ?",
-                (qty + 1, inv_id),
+                (qty + quantity, inv_id),
             )
         else:
             await db.execute(
                 "INSERT INTO inventories (user_id, item_id, quantity) VALUES (?, ?, ?)",
-                (user["id"], item["id"], 1),
+                (user["id"], item["id"], quantity),
             )
 
+        # 재고 차감 (무제한이 아니라면)
         if stock is not None:
             await db.execute(
-                "UPDATE items SET stock = stock - 1 WHERE id = ? AND stock IS NOT NULL",
-                (item["id"],),
+                "UPDATE items SET stock = stock - ? WHERE id = ? AND stock IS NOT NULL",
+                (quantity, item["id"]),
             )
 
         await db.commit()
 
-    new_stock_value = None if stock is None else max(stock - 1, 0)
-    new_stock_text = "무제한" if new_stock_value is None else f"{new_stock_value}개"
+    # 새 재고 값 계산
+    if stock is None:
+        new_stock_text = "무제한"
+    else:
+        new_stock_value = max(stock - quantity, 0)
+        new_stock_text = f"{new_stock_value}개"
 
     await send_reply(
         inter,
-        f"✅ **{item['name']}** 을(를) 구매했습니다!\n"
-        f"- 지불: {price} {cur_name} (`{cur_code}`)\n"
+        f"✅ **{item['name']}** 을(를) **{quantity}개** 구매했습니다!\n"
+        f"- 지불: {total_price} {cur_name} (`{cur_code}`)\n"
         f"- 남은 소지금: {new_balance} {cur_name}\n"
         f"- 남은 재고: {new_stock_text}",
         ephemeral=False,
     )
+
 
 
 # =========================================================
