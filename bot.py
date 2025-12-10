@@ -1335,8 +1335,8 @@ async def slash_gift_item(
         title="🎁 아이템 선물 완료!",
         description=(
             f"{inter.user.mention} 님이 {member.mention} 님에게 아이템을 선물했습니다.\n\n"
-            f"🎒 아이템: **{item['name']}**\n"
-            f"📦 선물한 개수: **{quantity}개**"
+            f"📦 아이템: **{item['name']}**\n"
+            f"🎁 선물한 개수: **{quantity}개**"
         ),
         color=discord.Color.blue(),  # 파란색 계열
     )
