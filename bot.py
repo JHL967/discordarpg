@@ -3272,22 +3272,25 @@ class PetManageView(discord.ui.View):
             title="🐾 펫 관리",
             description="수정하거나 삭제할 펫을 선택한 뒤 버튼을 눌러주세요.",
             color=discord.Color.green(),
-        )
+    )
+
         if not self.pets:
-            embed.add_field(name="등록된 펫이 없습니다.", value="`/펫등록` 으로 먼저 펫을 등록해 주세요.", inline=False)
+            embed.add_field(
+                name="등록된 펫이 없습니다.",
+                value="`/펫등록` 으로 먼저 펫을 등록해 주세요.",
+                inline=False,
+            )
             return embed
 
-        text_lines = []
-        for p in self.pets:
-            desc = (p.get("description") or "").replace("\n", " ")
-            if len(desc) > 40:
-                desc = desc[:37] + "..."
-            text_lines.append(f"**ID {p['id']}** · **{p['name']}** - {desc or '설명 없음'}")
-        embed.add_field(
-            name=f"등록된 펫 목록 ({len(self.pets)}개)",
-            value="\n".join(text_lines)[:4000] or "없음",
-            inline=False,
-        )
+    # 🔽 각 펫을 별도 필드로, ID 표시는 빼고 전체 설명 표시
+        for pet in self.pets:
+            desc = pet.get("description") or "설명 없음"
+            embed.add_field(
+                name=pet["name"],              # 예: [펫] 가수 앵무
+                value=f"ㄴ 설명: {desc}",      # 전체 설명
+                inline=False,
+            )
+
         embed.set_footer(text="선택 후 버튼으로 수정/삭제할 수 있어요.")
         return embed
 
