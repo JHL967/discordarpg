@@ -1946,6 +1946,63 @@ async def slash_buy_item(inter: discord.Interaction, item_name: str, quantity: i
         ephemeral=False,
     )
 
+@bot.tree.command(
+    name="선택구매",
+    description="상점 리스트에서 아이템을 선택해서 구매합니다.",
+)
+async def slash_buy_select(inter: discord.Interaction):
+    # 상점 채널에서만 사용
+    if not await ensure_channel_inter(inter, "shop"):
+        return
+
+    guild_id = inter.guild.id
+
+    # 상점에서 구매 가능한 아이템 목록 불러오기
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT i.id,
+                   i.name,
+                   i.price,
+                   i.stock,
+                   i.description,
+                   c.id   AS currency_id,
+                   c.name AS currency_name,
+                   c.code AS currency_code
+              FROM items AS i
+              LEFT JOIN currencies AS c
+                ON i.currency_id = c.id
+             WHERE i.guild_id = ?
+               AND i.is_shop = 1
+               AND (i.stock IS NULL OR i.stock > 0)  -- 재고 0인 건 안 보이게
+             ORDER BY i.name
+            """,
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    if not rows:
+        await send_reply(
+            inter,
+            "현재 상점에 구매 가능한 아이템이 없습니다.\n"
+            "`/아이템추가` 또는 `/이벤트아이템추가` 로 먼저 아이템을 등록해 주세요.",
+            ephemeral=True,
+        )
+        return
+
+    items = [dict(r) for r in rows]
+
+    view = SelectBuyView(items=items, buyer_id=inter.user.id, guild_id=guild_id)
+    embed = view.make_list_embed()
+
+    # 셀렉트/버튼은 개인용으로만 보여줘도 되니까 ephemeral=True
+    if inter.response.is_done():
+        msg = await inter.followup.send(embed=embed, view=view, ephemeral=True)
+    else:
+        msg = await inter.response.send_message(embed=embed, view=view, ephemeral=True)
+    view.message = msg
 
 
 
@@ -3706,6 +3763,212 @@ class ItemNextButton(discord.ui.Button):
         view.page = (view.page + 1) % view.total_pages
         embed = view.make_list_embed()
         await inter.response.edit_message(embed=embed, view=view)
+
+#선택 구매용 view
+class SelectBuyView(discord.ui.View):
+    def __init__(self, items: list[dict], buyer_id: int, guild_id: int):
+        super().__init__(timeout=300)
+        self.items = items
+        self.buyer_id = buyer_id
+        self.guild_id = guild_id
+        self.message: discord.Message | None = None
+
+        # 셀렉트 옵션 (최대 25개까지만 표시 가능)
+        options = [
+            discord.SelectOption(
+                label=item["name"],  # [숫자] 같은 거 없이 이름만
+                description=f"가격: {item['price']} {item['currency_name']} / 재고: "
+                            f"{'무제한' if item['stock'] is None else item['stock']}개",
+                value=str(item["id"]),  # 내부 값은 ID
+            )
+            for item in self.items[:25]
+        ]
+
+        self.select = discord.ui.Select(
+            placeholder="구매할 아이템을 선택하세요.",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.select.callback = self.on_select
+        self.add_item(self.select)
+
+    # 이 뷰를 연 사람만 조작 가능하게
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.buyer_id:
+            await interaction.response.send_message(
+                "이 메뉴를 연 사용자만 사용할 수 있어요!", ephemeral=True
+            )
+            return False
+        return True
+
+    def make_list_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="🛒 선택 구매",
+            description="구매할 아이템을 아래 셀렉트 박스에서 고른 뒤, 수량을 입력해 주세요.",
+            color=discord.Color.blurple(),
+        )
+
+        if not self.items:
+            embed.add_field(
+                name="구매 가능한 아이템이 없습니다.",
+                value="`/상점` 또는 `/아이템추가` 로 먼저 아이템을 등록해 주세요.",
+                inline=False,
+            )
+            return embed
+
+        # 아이템들을 두 번째 스샷처럼 블럭 형태로 표시
+        for item in self.items:
+            stock_text = "무제한" if item["stock"] is None else f"{item['stock']}개"
+            desc_lines = [
+                f"ㄴ 가격: {item['price']} {item['currency_name']} (`{item['currency_code']}`)",
+                f"ㄴ 재고: {stock_text}",
+            ]
+            if item.get("description"):
+                desc_lines.append(f"ㄴ 설명: {item['description']}")
+            embed.add_field(
+                name=item["name"],
+                value="\n".join(desc_lines),
+                inline=False,
+            )
+
+        embed.set_footer(text="셀렉트로 아이템을 고른 뒤 수량 입력 모달이 뜹니다.")
+        return embed
+
+    def get_selected_item(self) -> dict | None:
+        if not self.select.values:
+            return None
+        item_id = int(self.select.values[0])
+        for item in self.items:
+            if item["id"] == item_id:
+                return item
+        return None
+
+    async def on_select(self, interaction: discord.Interaction):
+        item = self.get_selected_item()
+        if not item:
+            await interaction.response.send_message(
+                "먼저 구매할 아이템을 선택해 주세요!", ephemeral=True
+            )
+            return
+
+        # ───────── 수량 입력 모달 ─────────
+        class QuantityModal(discord.ui.Modal, title=f"{item['name']} 구매"):
+            def __init__(self, parent_view: "SelectBuyView", item_data: dict):
+                super().__init__()
+                self.parent_view = parent_view
+                self.item_data = item_data
+
+                self.quantity = discord.ui.TextInput(
+                    label="구매할 개수",
+                    placeholder="1 이상의 정수",
+                    default="1",
+                    max_length=5,
+                )
+                self.add_item(self.quantity)
+
+            async def on_submit(self, modal_inter: discord.Interaction):
+                # 개수 파싱
+                try:
+                    qty = int(self.quantity.value)
+                except ValueError:
+                    await modal_inter.response.send_message(
+                        "구매 개수는 1 이상의 정수여야 합니다.", ephemeral=True
+                    )
+                    return
+
+                if qty <= 0:
+                    await modal_inter.response.send_message(
+                        "구매 개수는 1 이상이어야 합니다.", ephemeral=True
+                    )
+                    return
+
+                item = self.item_data
+                stock = item.get("stock")
+
+                # 재고 체크
+                if stock is not None and stock < qty:
+                    await modal_inter.response.send_message(
+                        f"❌ **{item['name']}** 의 재고가 부족합니다.\n"
+                        f"- 현재 재고: {stock}개\n"
+                        f"- 요청 수량: {qty}개",
+                        ephemeral=True,
+                    )
+                    return
+
+                # 유저/통화 정보
+                user = await get_or_create_user(self.parent_view.guild_id, modal_inter.user.id)
+                price = item["price"]
+                currency_id = item["currency_id"]
+                cur_name = item["currency_name"] or "알 수 없음"
+                cur_code = item["currency_code"] or "?"
+                total_price = price * qty
+
+                # 잔액 확인
+                current_balance = await get_balance(user["id"], currency_id)
+                if current_balance < total_price:
+                    await modal_inter.response.send_message(
+                        f"재화가 부족합니다!\n"
+                        f"- 필요 금액: {total_price} {cur_name}\n"
+                        f"- 현재 소지금: {current_balance} {cur_name}",
+                        ephemeral=True,
+                    )
+                    return
+
+                # 재화 차감
+                new_balance = await change_balance(user["id"], currency_id, -total_price)
+
+                # 인벤토리 + 재고 처리
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cursor = await db.execute(
+                        "SELECT id, quantity FROM inventories "
+                        "WHERE user_id = ? AND item_id = ?",
+                        (user["id"], item["id"]),
+                    )
+                    row = await cursor.fetchone()
+                    await cursor.close()
+
+                    if row:
+                        inv_id, old_qty = row
+                        await db.execute(
+                            "UPDATE inventories SET quantity = ? WHERE id = ?",
+                            (old_qty + qty, inv_id),
+                        )
+                    else:
+                        await db.execute(
+                            "INSERT INTO inventories (user_id, item_id, quantity) "
+                            "VALUES (?, ?, ?)",
+                            (user["id"], item["id"], qty),
+                        )
+
+                    # 재고 감소
+                    if stock is not None:
+                        await db.execute(
+                            "UPDATE items "
+                            "SET stock = stock - ? "
+                            "WHERE id = ? AND stock IS NOT NULL",
+                            (qty, item["id"]),
+                        )
+
+                    await db.commit()
+
+                # 남은 재고 텍스트
+                if stock is None:
+                    new_stock_text = "무제한"
+                else:
+                    new_stock_text = f"{max(stock - qty, 0)}개"
+
+                # 상점 채널에 결과는 공개 메시지로
+                await modal_inter.response.send_message(
+                    f"✅ **{item['name']}** {qty}개 구매 완료!\n"
+                    f"- 지불한 금액: {total_price} {cur_name}\n"
+                    f"- 남은 소지금: {new_balance} {cur_name}\n"
+                    f"- 남은 재고: {new_stock_text}",
+                    ephemeral=False,
+                )
+
+        await interaction.response.send_modal(QuantityModal(self, item))
+
 
 # =========================================================
 # 펫 도감용 View / Select / 페이지 버튼
