@@ -2820,6 +2820,83 @@ async def slash_delete_pet(inter: discord.Interaction, name: str):
         await db.commit()
 
     await send_reply(inter, f"🗑️ `{name}` 펫이 도감에서 삭제되었습니다.", ephemeral=False)
+@bot.tree.command(
+    name="펫관리",
+    description="등록된 펫을 선택해서 수정/삭제합니다. (관리자)",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def slash_manage_pets(inter: discord.Interaction):
+    # 서버 안에서만
+    if not is_guild_inter(inter):
+        await send_reply(inter, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+        return
+
+    guild_id = inter.guild.id
+
+    # 이 명령어는 '상점 채널' 또는 '관리자용 봇채널'에서만 사용 가능
+    settings = await get_or_create_guild_settings(guild_id)
+    shop_channel_id = settings["shop_channel_id"]
+    admin_channel_id = await get_admin_channel_id(guild_id)
+
+    if shop_channel_id is None and admin_channel_id is None:
+        await send_reply(
+            inter,
+            "아직 상점 채널이나 관리자용 봇채널이 설정되지 않았어요.\n"
+            "`/상점채널설정`, `/명령어채널설정` 으로 먼저 채널을 설정해 주세요.",
+            ephemeral=True,
+        )
+        return
+
+    if (shop_channel_id is not None and str(inter.channel.id) == str(shop_channel_id)) or \
+       (admin_channel_id is not None and str(inter.channel.id) == str(admin_channel_id)):
+        pass
+    else:
+        await send_reply(
+            inter,
+            "이 명령어는 **상점 채널** 또는 **관리자용 봇채널**에서만 사용할 수 있어요!",
+            ephemeral=True,
+        )
+        return
+
+    # guild별 등록된 펫 목록 가져오기
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id,
+                   name,
+                   description
+              FROM pets
+             WHERE guild_id = ?
+             ORDER BY name
+            """,
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    if not rows:
+        await send_reply(
+            inter,
+            "현재 등록된 펫이 없습니다.\n"
+            "`/펫등록` 으로 먼저 펫을 등록해 주세요.",
+            ephemeral=True,
+        )
+        return
+
+    pets = [dict(r) for r in rows]
+
+    view = PetManageView(pets, manager_id=inter.user.id, guild_id=guild_id)
+    embed = view.make_list_embed()
+
+    try:
+        if inter.response.is_done():
+            message = await inter.followup.send(embed=embed, view=view, ephemeral=True)
+        else:
+            message = await inter.response.send_message(embed=embed, view=view, ephemeral=True)
+        view.message = message
+    except discord.NotFound:
+        print("[WARN] 펫관리 응답 중 인터랙션 만료(404)")
 
 # =========================================================
 # 9. 정산 / 확인 (관리자용 봇채널)
@@ -3157,6 +3234,231 @@ class ItemManageView(discord.ui.View):
             color=discord.Color.blue(),
         )
         return embed
+# ============================================
+# 펫 관리용 View
+# ============================================
+class PetManageView(discord.ui.View):
+    def __init__(self, pets: list[dict], manager_id: int, guild_id: int):
+        super().__init__(timeout=300)
+        self.pets = pets
+        self.manager_id = manager_id
+        self.guild_id = guild_id
+        self.message: discord.Message | None = None
+
+        # 펫 선택 셀렉트 박스 (최대 25개까지만 표시됨)
+        options = [
+            discord.SelectOption(
+                label=f"{p['name']}",
+                description=(p.get("description") or "")[:90] or "설명 없음",
+                value=str(p["id"]),
+            )
+            for p in self.pets[:25]
+        ]
+
+        self.select = discord.ui.Select(
+            placeholder="수정/삭제할 펫을 선택하세요.",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.select.callback = self.on_select  # 직접 콜백 연결
+        self.add_item(self.select)
+
+    # -----------------------------
+    # 공용: 현재 Embed 생성
+    # -----------------------------
+    def make_list_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="🐾 펫 관리",
+            description="수정하거나 삭제할 펫을 선택한 뒤 버튼을 눌러주세요.",
+            color=discord.Color.green(),
+        )
+        if not self.pets:
+            embed.add_field(name="등록된 펫이 없습니다.", value="`/펫등록` 으로 먼저 펫을 등록해 주세요.", inline=False)
+            return embed
+
+        text_lines = []
+        for p in self.pets:
+            desc = (p.get("description") or "").replace("\n", " ")
+            if len(desc) > 40:
+                desc = desc[:37] + "..."
+            text_lines.append(f"**ID {p['id']}** · **{p['name']}** - {desc or '설명 없음'}")
+        embed.add_field(
+            name=f"등록된 펫 목록 ({len(self.pets)}개)",
+            value="\n".join(text_lines)[:4000] or "없음",
+            inline=False,
+        )
+        embed.set_footer(text="선택 후 버튼으로 수정/삭제할 수 있어요.")
+        return embed
+
+    # -----------------------------
+    # 공용: 권한 체크 (작성자만 조작)
+    # -----------------------------
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.manager_id:
+            await interaction.response.send_message(
+                "이 뷰를 연 사람만 조작할 수 있어요!", ephemeral=True
+            )
+            return False
+        return True
+
+    # -----------------------------
+    # 셀렉트 변경시 (현재는 아무 메시지도 안 보냄)
+    # -----------------------------
+    async def on_select(self, interaction: discord.Interaction):
+        await interaction.response.defer()  # 그냥 선택만, 별도 메시지 X
+
+    # -----------------------------
+    # 내부 유틸: 선택된 pet dict 가져오기
+    # -----------------------------
+    def get_selected_pet(self) -> dict | None:
+        if not self.select.values:
+            return None
+        pet_id = int(self.select.values[0])
+        for p in self.pets:
+            if p["id"] == pet_id:
+                return p
+        return None
+
+    # -----------------------------
+    # [버튼] 이름/설명 수정
+    # -----------------------------
+    @discord.ui.button(label="✏ 이름/설명 수정", style=discord.ButtonStyle.primary)
+    async def edit_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        pet = self.get_selected_pet()
+        if not pet:
+            await interaction.response.send_message(
+                "먼저 수정할 펫을 셀렉트에서 선택해 주세요!", ephemeral=True
+            )
+            return
+
+        # 모달 정의
+        class PetEditModal(discord.ui.Modal, title=f"펫 수정 - ID {pet['id']}"):
+            def __init__(self, parent_view: "PetManageView", pet_data: dict):
+                super().__init__()
+                self.parent_view = parent_view
+                self.pet_data = pet_data
+
+                self.name = discord.ui.TextInput(
+                    label="펫 이름",
+                    default=pet_data["name"],
+                    max_length=50,
+                )
+                self.description = discord.ui.TextInput(
+                    label="설명",
+                    style=discord.TextStyle.paragraph,
+                    default=pet_data.get("description") or "",
+                    max_length=500,
+                    required=False,
+                )
+
+                self.add_item(self.name)
+                self.add_item(self.description)
+
+            async def on_submit(self, modal_inter: discord.Interaction):
+                new_name = self.name.value.strip()
+                new_desc = self.description.value.strip()
+
+                if not new_name:
+                    await modal_inter.response.send_message(
+                        "펫 이름은 비워둘 수 없어요!", ephemeral=True
+                    )
+                    return
+
+                # DB 업데이트
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        """
+                        UPDATE pets
+                           SET name = ?, description = ?
+                         WHERE id = ?
+                           AND guild_id = ?
+                        """,
+                        (new_name, new_desc, self.pet_data["id"], self.parent_view.guild_id),
+                    )
+                    await db.commit()
+
+                # 메모리 상 리스트도 수정
+                self.pet_data["name"] = new_name
+                self.pet_data["description"] = new_desc
+
+                # 셀렉트 옵션과 Embed 갱신
+                self.parent_view.refresh_select_options()
+                new_embed = self.parent_view.make_list_embed()
+                if self.parent_view.message:
+                    await self.parent_view.message.edit(embed=new_embed, view=self.parent_view)
+
+                await modal_inter.response.send_message(
+                    f"✅ 펫(ID {self.pet_data['id']}) 정보가 수정되었습니다.",
+                    ephemeral=True,
+                )
+
+        await interaction.response.send_modal(PetEditModal(self, pet))
+
+    # -----------------------------
+    # [버튼] 펫 삭제
+    # -----------------------------
+    @discord.ui.button(label="🗑 삭제", style=discord.ButtonStyle.danger)
+    async def delete_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        pet = self.get_selected_pet()
+        if not pet:
+            await interaction.response.send_message(
+                "먼저 삭제할 펫을 셀렉트에서 선택해 주세요!", ephemeral=True
+            )
+            return
+
+        pet_id = pet["id"]
+
+        # DB에서 삭제
+        async with aiosqlite.connect(DB_PATH) as db:
+            # user_pets 같은 테이블이 있다면 여기서 같이 삭제해 주세요.
+            await db.execute(
+                "DELETE FROM pets WHERE id = ? AND guild_id = ?",
+                (pet_id, self.guild_id),
+            )
+            await db.commit()
+
+        # 리스트에서도 제거
+        self.pets = [p for p in self.pets if p["id"] != pet_id]
+
+        # 목록 비어있으면 버튼 비활성화
+        if not self.pets:
+            for child in self.children:
+                if isinstance(child, discord.ui.Button) or isinstance(child, discord.ui.Select):
+                    child.disabled = True
+
+        # 셀렉트 옵션/Embed 갱신
+        self.refresh_select_options()
+        new_embed = self.make_list_embed()
+        if self.message:
+            await self.message.edit(embed=new_embed, view=self)
+
+        await interaction.response.send_message(
+            f"🗑 펫(ID {pet_id})이(가) 삭제되었습니다.", ephemeral=True
+        )
+
+    # -----------------------------
+    # 셀렉트 옵션 재생성
+    # -----------------------------
+    def refresh_select_options(self):
+        # 기존 select 객체의 options를 새로 채워넣기
+        options = [
+            discord.SelectOption(
+                label=p["name"],
+                description=(p.get("description") or "")[:90] or "설명 없음",
+                value=str(p["id"]),
+            )
+            for p in self.pets[:25]
+        ]
+        self.select.options = options
 
 
 class ItemSelect(discord.ui.Select):
