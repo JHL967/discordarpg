@@ -41,6 +41,7 @@ from db import (
     increment_fishing_daily_count, # ✅ 추가
     add_or_update_pet,   # ✅ 추가
     list_pets,           # ✅ 추가
+    get_item_by_name_any,
 )
 
 # =========================================================
@@ -3097,7 +3098,7 @@ async def slash_settle_item(
         return
 
     name = item_name.strip()
-    item = await get_item_by_name(inter.guild.id, name)
+    item = await get_item_by_name_any(inter.guild.id, name)
     if not item:
         await send_reply(
             inter,

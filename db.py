@@ -622,6 +622,22 @@ async def get_inventory(db_user_id: int):
         await cursor.close()
         return [dict(r) for r in rows]
 
+async def get_item_by_name_any(guild_id: int, name: str):
+    """상점/이벤트/관리자/낚시 등 타입 상관없이 아이템 이름으로 조회"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT *
+            FROM items
+            WHERE guild_id = ? AND name = ?
+            LIMIT 1
+            """,
+            (guild_id, name),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else None
 
 # ---------------------------------------------------------
 # 판매 상점(sell_shop_items) 헬퍼
