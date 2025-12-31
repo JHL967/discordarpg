@@ -42,6 +42,8 @@ from db import (
     add_or_update_pet,   # ✅ 추가
     list_pets,           # ✅ 추가
     get_item_by_name_any,
+    upsert_shop_item_by_name,
+    get_shop_item_by_name,
 )
 
 # =========================================================
@@ -1257,7 +1259,7 @@ async def slash_gift_item(
         await send_reply(inter, "선물할 개수는 1 이상이어야 합니다.", ephemeral=True)
         return
 
-    item = await get_item_by_name(inter.guild.id, name)
+    item = await get_shop_item_by_name(inter.guild.id, name)
     if not item:
         await send_reply(
             inter,
@@ -1593,15 +1595,15 @@ async def slash_add_item_cmd(
         )
         return
 
-    item_id = await add_item(
-        inter.guild.id,
-        name,
-        price,
-        description,
-        cur["id"],
-        stock_value,
-        is_shop=True,  # 상점용
+    item_id = await upsert_shop_item_by_name(
+    inter.guild.id,
+    name.strip(),
+    price,
+    description or "설명 없음",
+    cur["id"],
+    stock_value,  # None이면 무제한 그대로
     )
+
     await send_reply(
         inter,
         f"✅ 일반 상점 아이템 추가 완료!\n"

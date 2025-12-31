@@ -621,6 +621,27 @@ async def get_inventory(db_user_id: int):
         rows = await cursor.fetchall()
         await cursor.close()
         return [dict(r) for r in rows]
+    
+async def get_shop_item_by_name(guild_id: int, name: str):
+    """상점에서 구매 가능한 아이템만 이름으로 조회 (중복이면 최신 ID 우선)"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT i.*, c.name AS currency_name, c.code AS currency_code
+              FROM items i
+              JOIN currencies c ON i.currency_id = c.id
+             WHERE i.guild_id = ?
+               AND i.name = ?
+               AND (i.is_shop = 1 OR i.is_shop IS NULL)
+             ORDER BY i.id DESC
+             LIMIT 1
+            """,
+            (guild_id, name),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return dict(row) if row else None
 
 async def get_item_by_name_any(guild_id: int, name: str):
     """상점/이벤트/관리자/낚시 등 타입 상관없이 아이템 이름으로 조회"""
@@ -721,6 +742,62 @@ async def update_user_last_bonus_attend(user_pk: int, date_str: str):
             (date_str, user_pk),
         )
         await db.commit()
+
+async def upsert_shop_item_by_name(
+    guild_id: int,
+    name: str,
+    price: int,
+    description: str,
+    currency_id: int,
+    stock: int | None,
+):
+    """
+    같은 이름 아이템이 이미 있으면(숨김 포함) INSERT 대신 UPDATE로 '복구/갱신'
+    - 숨김(is_shop=0)으로 삭제했던 아이템을 다시 상점에 올릴 때 중복 방지
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        cur = await db.execute(
+            """
+            SELECT id
+              FROM items
+             WHERE guild_id = ? AND name = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (guild_id, name),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+
+        if row:
+            item_id = row["id"]
+            await db.execute(
+                """
+                UPDATE items
+                   SET price = ?,
+                       description = ?,
+                       currency_id = ?,
+                       stock = ?,
+                       is_shop = 1
+                 WHERE id = ? AND guild_id = ?
+                """,
+                (price, description, currency_id, stock, item_id, guild_id),
+            )
+            await db.commit()
+            return item_id
+
+        # 없으면 새로 생성
+        cur = await db.execute(
+            """
+            INSERT INTO items (guild_id, name, price, description, currency_id, stock, is_shop)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+            """,
+            (guild_id, name, price, description, currency_id, stock),
+        )
+        await db.commit()
+        return cur.lastrowid
 
 # ---------------------------------------------------------
 # 낚시(fishing_loot) 헬퍼
